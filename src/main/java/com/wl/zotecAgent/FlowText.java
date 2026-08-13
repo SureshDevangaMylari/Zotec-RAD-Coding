@@ -21,8 +21,9 @@ import com.wl.util.PlaywrightService;
 
 //   "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\playwright"
 /**
- * Text-based coding flow. RAD portal has no ED supplemental form —
- * after patient details, fills ICD/CPT only.
+ * Text-based coding flow. Walks each Select client(s) location that shows a blue
+ * {@code badge-info} report count — one checkbox at a time; unchecks when done.
+ * RAD portal has no ED supplemental form — after patient details, fills ICD/CPT only.
  */
 @Component
 public class FlowText {
@@ -36,8 +37,8 @@ public class FlowText {
     public static LinkedHashMap<String, String> ExcelObj = new LinkedHashMap<>();
     static String accountNumber;
 
-    private static final String CLIENT_CHECKBOX_XPATH =
-	    "//*[@class='badge badge-info pull-right ng-binding']/preceding-sibling::input";
+    /** Text Flow uses blue badge-info (non-image report counts). */
+    private static final String LOCATION_BADGE = ClientLocationSelector.BADGE_INFO;
     private static final String NO_MORE_REPORTS =
 	    "There are no more reports to view based on your filters";
     private static final String REPORT_COMPLETED = "This report has been completed.";
@@ -62,34 +63,23 @@ public class FlowText {
 	    zs.login(page);
 	    Thread.sleep(5000);
 
-	    openClientSelector(ps, page);
-	    List<Locator> clients = ps.getElements(CLIENT_CHECKBOX_XPATH, "getting client checkboxes");
-	    int clientCount = clients.size();
-	    logger.info("Found {} client checkbox(es) in Select client(s)", clientCount);
+	    ClientLocationSelector.openClientSelector(ps, page, LOCATION_BADGE);
+	    List<String> locationKeys = ClientLocationSelector.collectLocationKeys(page, LOCATION_BADGE);
+	    logger.info("Found {} blue-badge location checkbox(es) with {}", locationKeys.size(),
+		    LOCATION_BADGE);
 
-	    List<String> uiLabels = new java.util.ArrayList<>(clientCount);
-	    for (int i = 0; i < clientCount; i++) {
-		uiLabels.add(readClientLabel(clients.get(i)));
-	    }
+	    for (int li = 0; li < locationKeys.size(); li++) {
+		String locationKey = locationKeys.get(li);
+		logger.info("Location [{}/{}]: selecting '{}'", li + 1, locationKeys.size(), locationKey);
 
-	    List<String> allowlist = AllowedClients.orderedEntries();
-	    java.util.Set<Integer> usedUiIndexes = new java.util.HashSet<>();
-	    logger.info("Walking {} AllowedClients entries in order (skip if missing from UI)",
-		    allowlist.size());
-
-	    for (int a = 0; a < allowlist.size(); a++) {
-		String allowEntry = allowlist.get(a);
-		int clientIndex = AllowedClients.findMatchingUiIndex(allowEntry, uiLabels, usedUiIndexes);
-		if (clientIndex < 0) {
-		    logger.info("Allowlist [{}/{}]: '{}' — not in Select client(s), skipping",
-			    a + 1, allowlist.size(), allowEntry);
+		String selectedClientLocation;
+		try {
+		    selectedClientLocation = ClientLocationSelector.selectOnlyAndApply(ps, page,
+			    LOCATION_BADGE, locationKey);
+		} catch (Exception e) {
+		    logger.warn("Could not select location '{}' — skipping: {}", locationKey, e.getMessage());
 		    continue;
 		}
-		usedUiIndexes.add(clientIndex);
-		logger.info("Allowlist [{}/{}]: '{}' — matched UI checkbox [{}] '{}'",
-			a + 1, allowlist.size(), allowEntry, clientIndex, uiLabels.get(clientIndex));
-
-		String selectedClientLocation = selectOnlyClientAndApply(ps, page, clientIndex);
 		logger.info("Selected client_location for upload metadata: {}", selectedClientLocation);
 
 		int patientIndex = 0;
@@ -98,14 +88,15 @@ public class FlowText {
 		while (true) {
 		    // ONLY leave this location when the empty-queue banner is shown
 		    if (hasNoMoreReportsMessage(page)) {
-			logger.info("UI: no more reports for allowlist '{}' — next location", allowEntry);
+			logger.info("UI: no more reports for '{}' — uncheck and next location",
+				locationKey);
 			break;
 		    }
 
 		    dismissDataLockedIfPresent(page);
 
 		    patientIndex++;
-		    logger.info("--- Patient #{} under '{}' ---", patientIndex, allowEntry);
+		    logger.info("--- Patient #{} under '{}' ---", patientIndex, locationKey);
 
 		    Locator reportLoc = page.locator("//*[@id='dictated-report-text']");
 		    String text = waitForDictatedReportText(ps, page, reportLoc);
@@ -135,7 +126,7 @@ public class FlowText {
 
 		    if (hasReportCompletedMessage(page)) {
 			logger.info("UI: This report has been completed — Skip to next patient ('{}')",
-				allowEntry);
+				locationKey);
 			SkipAdvanceResult completedSkip = clickSkipAndWaitForNext(ps, page,
 				previousTextFingerprint);
 			if (completedSkip == SkipAdvanceResult.NO_MORE_REPORTS) {
@@ -152,118 +143,31 @@ public class FlowText {
 		    SkipAdvanceResult advance = waitForManualSubmitOrSkipAndNext(ps, page,
 			    previousTextFingerprint);
 		    if (advance == SkipAdvanceResult.NO_MORE_REPORTS) {
-			logger.info("No more patients for '{}' — next allowlist location", allowEntry);
+			logger.info("No more patients for '{}' — uncheck and next location", locationKey);
 			break;
 		    }
 		    if (advance == SkipAdvanceResult.TIMEOUT) {
 			logger.warn(
 				"Manual Submit/Skip wait timed out — stay on '{}'; will retry next loop",
-				allowEntry);
+				locationKey);
 		    }
+		}
+
+		try {
+		    ClientLocationSelector.uncheckAllAndApply(ps, page, LOCATION_BADGE);
+		    logger.info("Unchecked location '{}' after patients completed", locationKey);
+		} catch (Exception e) {
+		    logger.warn("Could not uncheck location '{}': {}", locationKey, e.getMessage());
 		}
 	    }
 
-	    logger.info("All AllowedClients locations processed");
+	    logger.info("All blue badge-info locations processed");
 	    page.pause();
 
 	} catch (Exception e) {
 	    e.printStackTrace();
 	    page.pause();
 	}
-    }
-
-    /** Open Select client(s) panel and wait for checkboxes. */
-    /**
-     * Open Select client(s) panel and wait for checkboxes.
-     * Select client(s) toggles: if an earlier click left the panel closed, click again
-     * so the bot (not the user) re-opens it before checkbox selection.
-     */
-    private void openClientSelector(PlaywrightService ps, Page page) throws InterruptedException {
-	Thread.sleep(1000);
-	Locator link = page.getByRole(AriaRole.LINK, new Page.GetByRoleOptions().setName("Select client(s)"));
-
-	ps.click(link, "opening client options (click 1)");
-	Thread.sleep(2000);
-
-	if (!clientCheckboxesVisible(page)) {
-	    logger.info("Client checkboxes not visible after first Select client(s) click — clicking again to open panel");
-	    ps.click(link, "opening client options (click 2 — re-open)");
-	    Thread.sleep(2000);
-	}
-
-	ps.waitForElement(page.locator(CLIENT_CHECKBOX_XPATH).first(), "waiting for client checkboxes");
-	Thread.sleep(1000);
-    }
-
-    private boolean clientCheckboxesVisible(Page page) {
-	try {
-	    Locator first = page.locator(CLIENT_CHECKBOX_XPATH).first();
-	    return first.count() > 0 && first.isVisible();
-	} catch (Exception e) {
-	    return false;
-	}
-    }
-
-    /**
-     * Label text + checkbox id for allowlist matching (name and/or code in parentheses).
-     */
-    private String readClientLabel(Locator checkbox) {
-	StringBuilder sb = new StringBuilder();
-	try {
-	    String id = checkbox.getAttribute("id");
-	    if (id != null && !id.isBlank()) {
-		sb.append(id).append(' ');
-	    }
-	} catch (Exception ignored) {
-	}
-	try {
-	    Locator label = checkbox.locator("xpath=ancestor::label[1]");
-	    if (label.count() > 0) {
-		sb.append(label.first().innerText());
-	    } else {
-		sb.append(checkbox.locator("xpath=..").innerText());
-	    }
-	} catch (Exception e) {
-	    logger.warn("Could not read client label: {}", e.getMessage());
-	}
-	return sb.toString().trim();
-    }
-
-    /**
-     * Uncheck all client boxes, check only {@code clientIndex}, then APPLY.
-     * Re-queries locators each time (DOM refreshes after APPLY).
-     *
-     * @return Select client(s) display name for upload {@code client_location}
-     */
-    private String selectOnlyClientAndApply(PlaywrightService ps, Page page, int clientIndex)
-	    throws InterruptedException {
-	openClientSelector(ps, page);
-
-	List<Locator> clients = ps.getElements(CLIENT_CHECKBOX_XPATH, "refresh client checkboxes");
-	if (clientIndex < 0 || clientIndex >= clients.size()) {
-	    throw new IllegalStateException("Client index out of range: " + clientIndex + " (size="
-		    + clients.size() + ")");
-	}
-
-	for (int i = 0; i < clients.size(); i++) {
-	    Locator box = clients.get(i);
-	    try {
-		if (box.isChecked()) {
-		    box.click();
-		    Thread.sleep(200);
-		}
-	    } catch (Exception e) {
-		logger.warn("Could not uncheck client checkbox {}: {}", i, e.getMessage());
-	    }
-	}
-
-	Locator selected = clients.get(clientIndex);
-	String clientLocation = WorkfileSummaryScraper.readSelectedClientDisplayName(selected);
-	selected.click();
-	Thread.sleep(2000);
-	ps.click(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("APPLY")), "APPLY client");
-	Thread.sleep(3000);
-	return clientLocation;
     }
 
     /**
@@ -320,11 +224,8 @@ public class FlowText {
 
 	//s.validateICD(icdList, page);
 	// Accident Date/Type often appear only after an accident ICD is on the form
-	s.validateCPT(page, cptEntries, icdList);
-	//TESTING PURPOSE
-		//Call ICD again
+	    s.validateCPT(page, cptEntries, icdList);
 		s.validateICD(icdList, page);
-	//TESTING PURPOSE
 		new CodingFormValidationService(page).updateBillingExtras(patientInfo);
 
 	if (dismissDataLockedIfPresent(page)) {
