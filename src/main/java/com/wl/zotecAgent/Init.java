@@ -6,7 +6,6 @@ package com.wl.zotecAgent;
  */
 @Deprecated
 public class Init {
-
     public static void main(String[] args) {
 	BotApplication.main(args);
     }
