@@ -29,7 +29,7 @@ public class PlayTest2 {
 
     public static final Logger logger = LogManager.getLogger(PlayTest2.class);
 
-    private static final String DEFAULT_RESUME_JSON = "resources/jsonfolder/review-5490932e-8b62-4391-8910-dcbcb698e3fa.json";
+    private static final String DEFAULT_RESUME_JSON = "resources/jsonfolder/review-cfb7d962-8500-467b-ac3c-6f4e15c73bb3.json";
 
     public static void main(String[] args) throws Exception {
 	String jsonPath = args.length > 0 ? args[0] : DEFAULT_RESUME_JSON;
@@ -79,13 +79,13 @@ public class PlayTest2 {
 	    logger.info("validateCPT entries: {}", cptEntries);
 	    logger.info("validateICD codes: {}", icdList);
 
-	    // ICD first so CPT Diagnoses column can use 1-based pointers
-	    s.validateICD(icdList, page);
 	    Thread.sleep(300);
-	    new CodingFormValidationService(page).updateBillingExtras(patientInfo);
+	    CodingFormValidationService formSvc = new CodingFormValidationService(page);
+	    formSvc.updateBillingExtras(patientInfo);
 	    s.validateCPT(page, cptEntries, icdList);
 	    Thread.sleep(300);
 	    s.validateICD(icdList, page);
+	    formSvc.updateIssueOrRfi(patientInfo);
 
 	    logger.info("Resume JSON test run completed");
 	    page.pause();

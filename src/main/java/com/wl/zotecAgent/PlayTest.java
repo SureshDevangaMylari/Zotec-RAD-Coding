@@ -88,10 +88,12 @@ public class PlayTest {
 	    // ICD first so CPT Diagnoses column can use 1-based pointers
 	    s.validateICD(icdList, page);
 	    Thread.sleep(300);
-	    new CodingFormValidationService(page).updateBillingExtras(patientInfo);
+	    CodingFormValidationService formSvc = new CodingFormValidationService(page);
+	    formSvc.updateBillingExtras(patientInfo);
 	    s.validateCPT(page, cptEntries, icdList);
 	    Thread.sleep(300);
 	    s.validateICD(icdList, page);
+	    formSvc.updateIssueOrRfi(patientInfo);
 
 	    logger.info("Image resume JSON test run completed");
 	    page.pause();

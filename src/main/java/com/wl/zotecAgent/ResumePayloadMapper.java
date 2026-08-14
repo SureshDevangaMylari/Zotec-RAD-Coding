@@ -176,8 +176,120 @@ public final class ResumePayloadMapper {
             out.put("critical_care", root.get("critical_care"));
         }
 
+        Map<String, Object> issue = extractIssue(root);
+        if (issue != null && !issue.isEmpty()) {
+            out.put("issue", issue);
+        }
+
+        Map<String, Object> rfi = extractRfi(root);
+        if (rfi != null && !rfi.isEmpty()) {
+            out.put("rfi", rfi);
+        }
+
         out.put("source", "resume_payload");
         return out;
+    }
+
+    /**
+     * Reads {@code issue} from review JSON using keys {@code issue_type} / {@code issue_comment}.
+     * Returns null when absent, null, or empty (no fill).
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> extractIssue(Map<String, Object> root) {
+        if (root == null || !root.containsKey("issue")) {
+            return null;
+        }
+        Object raw = root.get("issue");
+        if (raw == null) {
+            return null;
+        }
+        if (raw instanceof String s) {
+            if (s.isBlank()) {
+                return null;
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("issue_type", s.trim());
+            return out;
+        }
+        if (!(raw instanceof Map<?, ?>)) {
+            return null;
+        }
+        Map<String, Object> src = (Map<String, Object>) raw;
+        if (src.isEmpty()) {
+            return null;
+        }
+        // Primary JSON keys: issue_type / issue_comment
+        String type = firstStr(src, "issue_type", "issueType", "type", "typeId", "type_id",
+                "description", "name");
+        String comment = firstStr(src, "issue_comment", "issueComment", "comment", "comments", "notes");
+        if ((type == null || type.isBlank()) && (comment == null || comment.isBlank())) {
+            return null;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (type != null && !type.isBlank()) {
+            out.put("issue_type", type.trim());
+        }
+        if (comment != null && !comment.isBlank()) {
+            out.put("issue_comment", comment.trim());
+        }
+        return out.isEmpty() ? null : out;
+    }
+
+    /**
+     * Reads {@code rfi} from review JSON using keys {@code provider}, {@code procedure},
+     * {@code reasons}, {@code comment}. Returns null when absent, null, or empty.
+     */
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> extractRfi(Map<String, Object> root) {
+        if (root == null || !root.containsKey("rfi")) {
+            return null;
+        }
+        Object raw = root.get("rfi");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Map<?, ?>)) {
+            return null;
+        }
+        Map<String, Object> src = (Map<String, Object>) raw;
+        if (src.isEmpty()) {
+            return null;
+        }
+        String provider = firstStr(src, "provider", "rfi_provider", "rfiProvider");
+        String procedure = firstStr(src, "procedure", "procedure_code", "procedureCode", "cpt");
+        String reasons = firstStr(src, "reasons", "reason", "reasonIds");
+        if (reasons == null && src.get("reasons") instanceof List<?> list) {
+            StringBuilder sb = new StringBuilder();
+            for (Object o : list) {
+                if (o == null || String.valueOf(o).isBlank()) {
+                    continue;
+                }
+                if (sb.length() > 0) {
+                    sb.append(",");
+                }
+                sb.append(String.valueOf(o).trim());
+            }
+            reasons = sb.length() > 0 ? sb.toString() : null;
+        }
+        String comment = firstStr(src, "comment", "rfi_comment", "rfiComment", "notes");
+        if ((provider == null || provider.isBlank()) && (procedure == null || procedure.isBlank())
+                && (reasons == null || reasons.isBlank()) && (comment == null || comment.isBlank())) {
+            return null;
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (provider != null && !provider.isBlank()) {
+            out.put("provider", provider.trim());
+        }
+        if (procedure != null && !procedure.isBlank()) {
+            out.put("procedure", procedure.trim());
+        }
+        if (reasons != null && !reasons.isBlank()) {
+            out.put("reasons", reasons.trim());
+        }
+        if (comment != null && !comment.isBlank()) {
+            out.put("comment", comment.trim());
+        }
+        return out.isEmpty() ? null : out;
     }
 
     /**

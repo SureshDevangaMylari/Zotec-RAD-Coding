@@ -229,7 +229,9 @@ public class Flow {
 		//s.validateICD(icdList, page);
 		s.validateCPT(page, cptEntries, icdList);
 		s.validateICD(icdList, page);
-		new CodingFormValidationService(page).updateBillingExtras(patientInfo);
+		CodingFormValidationService formSvc = new CodingFormValidationService(page);
+		formSvc.updateBillingExtras(patientInfo);
+		formSvc.updateIssueOrRfi(patientInfo);
 
 	if (dismissDataLockedIfPresent(page)) {
 	    logger.info("Data Locked after CPT/ICD — OK clicked, move to next patient");

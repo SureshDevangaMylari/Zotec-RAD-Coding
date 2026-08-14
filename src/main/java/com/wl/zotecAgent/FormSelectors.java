@@ -86,6 +86,36 @@ public final class FormSelectors {
     public static final String ACCIDENT_TYPE_CHOICE = ACCIDENT_TYPE + " .select2-choice";
     public static final String ACCIDENT_TYPE_CHOSEN = ACCIDENT_TYPE + " .select2-chosen";
 
+    // Issue — revealed after "Move to Issue" (ng-if currentReport.issue)
+    public static final String MOVE_TO_ISSUE_BUTTON =
+	    "button:has-text('Move to Issue'), button:has-text('Move To Issue')";
+    public static final String ISSUE_WELL = "#issue-well";
+    public static final String ISSUE_TYPE_SELECT = "#codingissuetype, select[name='typeId']";
+    public static final String ISSUE_TYPE = "#s2id_codingissuetype";
+    public static final String ISSUE_TYPE_CHOICE = ISSUE_TYPE + " .select2-choice";
+    public static final String ISSUE_TYPE_CHOSEN = ISSUE_TYPE + " .select2-chosen";
+    public static final String ISSUE_COMMENT = XP
+	    + "//label[normalize-space()='Issue Comment']/following::textarea[1]";
+
+    // RFI — revealed after "RFI" (ng-if currentReport.codingRFI); mutually exclusive with Issue
+    public static final String RFI_BUTTON =
+	    "button.btn-default:has-text('RFI'), button:has-text('RFI'):not(:has-text('Resolve'))";
+    public static final String RFI_WELL = "#rfi-well";
+    public static final String RFI_PROVIDER_CHOICE = XP
+	    + "//label[normalize-space()='RFI Provider']/following::div[contains(@class,'select2-container')][1]//a[contains(@class,'select2-choice')]";
+    public static final String RFI_PROVIDER_CHOSEN = XP
+	    + "//label[normalize-space()='RFI Provider']/following::div[contains(@class,'select2-container')][1]//span[contains(@class,'select2-chosen')]";
+    public static final String RFI_PROCEDURE_SELECT =
+	    "#rfi-well select[name='procedureCode'], form[name='rfiForm'] select[name='procedureCode']";
+    public static final String RFI_PROCEDURE_CHOICE = XP
+	    + "//label[normalize-space()='Procedure']/following::div[contains(@class,'select2-container')][1]//a[contains(@class,'select2-choice')]";
+    public static final String RFI_REASONS_SELECT =
+	    "#rfi-well select[name='reasonIds'], form[name='rfiForm'] select[name='reasonIds']";
+    public static final String RFI_REASONS_CHOICES = XP
+	    + "//label[normalize-space()='Reasons']/following::div[contains(@class,'select2-container')][1]//ul[contains(@class,'select2-choices')]";
+    public static final String RFI_COMMENT =
+	    "#rfi-well textarea[name='comment'], form[name='rfiForm'] textarea[name='comment']";
+
     // Admitted — Yes button when not yet admitted; Admit Date when already admitted
     public static final String ADMITTED_YES = XP + "//label[contains(text(),'Admitted')]/following-sibling::div//button[text()='Yes']";
     public static final String ADMITTED_DATE = "#admittedDate";

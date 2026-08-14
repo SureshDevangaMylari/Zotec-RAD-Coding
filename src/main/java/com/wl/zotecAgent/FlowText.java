@@ -226,7 +226,9 @@ public class FlowText {
 	// Accident Date/Type often appear only after an accident ICD is on the form
 	    s.validateCPT(page, cptEntries, icdList);
 		s.validateICD(icdList, page);
-		new CodingFormValidationService(page).updateBillingExtras(patientInfo);
+		CodingFormValidationService formSvc = new CodingFormValidationService(page);
+		formSvc.updateBillingExtras(patientInfo);
+		formSvc.updateIssueOrRfi(patientInfo);
 
 	if (dismissDataLockedIfPresent(page)) {
 	    logger.info("Data Locked after CPT/ICD — OK clicked, move to next patient");

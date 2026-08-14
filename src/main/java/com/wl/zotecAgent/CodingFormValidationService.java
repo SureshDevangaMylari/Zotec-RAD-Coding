@@ -58,7 +58,7 @@ public class CodingFormValidationService {
 	updateAdmitted(extractedData);
 	updateProviders(extractedData);
 	updateDisposition(extractedData);
-	updateDiagnosisCodes(extractedData);
+	// ICD grid is filled later by Service.validateICD (after CPT) — do not fill here
 	updateBillingExtras(extractedData);
 	log.info("Coding form validation complete");
     }
@@ -75,6 +75,792 @@ public class CodingFormValidationService {
 	updateAccidentDate(data);
 	updateAccidentType(data);
 	updateCriticalCare(data);
+    }
+
+    /**
+     * After CPT/ICD/billing fill: apply exactly one of {@code rfi} or {@code issue}
+     * from JSON (never both). Prefer RFI when both appear. Skip when neither has data.
+     */
+    public void updateIssueOrRfi(Map<String, Object> data) {
+	if (data == null || data.isEmpty()) {
+	    return;
+	}
+	Map<String, Object> rfi = resolveRfiMap(data);
+	Map<String, Object> issue = resolveIssueMap(data);
+	boolean hasRfi = rfi != null && !rfi.isEmpty();
+	boolean hasIssue = issue != null && !issue.isEmpty();
+	if (hasRfi && hasIssue) {
+	    log.warn("JSON has both rfi and issue — filling RFI only (Move to Issue ignored)");
+	}
+	if (hasRfi) {
+	    fillRfi(rfi);
+	    return;
+	}
+	if (hasIssue) {
+	    fillIssue(issue);
+	    return;
+	}
+	PlayTestActionLog.noData("Issue/RFI");
+    }
+
+    /**
+     * After CPT/ICD/billing fill: if JSON {@code issue} has {@code issue_type} /
+     * {@code issue_comment}, click Move to Issue (when needed) and fill those fields.
+     * Skips when {@code issue} is absent, null, or empty.
+     * Prefer {@link #updateIssueOrRfi} so RFI and Issue stay mutually exclusive.
+     */
+    public void updateIssue(Map<String, Object> data) {
+	if (data == null || data.isEmpty()) {
+	    return;
+	}
+	Map<String, Object> issue = resolveIssueMap(data);
+	if (issue == null || issue.isEmpty()) {
+	    PlayTestActionLog.noData("Issue");
+	    return;
+	}
+	fillIssue(issue);
+    }
+
+    /**
+     * After CPT/ICD/billing fill: if JSON {@code rfi} has provider/procedure/reasons/comment,
+     * click RFI (when needed) and fill those fields. Prefer {@link #updateIssueOrRfi}.
+     */
+    public void updateRfi(Map<String, Object> data) {
+	if (data == null || data.isEmpty()) {
+	    return;
+	}
+	Map<String, Object> rfi = resolveRfiMap(data);
+	if (rfi == null || rfi.isEmpty()) {
+	    PlayTestActionLog.noData("RFI");
+	    return;
+	}
+	fillRfi(rfi);
+    }
+
+    private Map<String, Object> resolveIssueMap(Map<String, Object> data) {
+	Map<String, Object> issue = asMap(data.get("issue"));
+	if (issue != null && !issue.isEmpty()) {
+	    return issue;
+	}
+	Map<String, Object> resume = asMap(data.get("resume_payload"));
+	if (resume != null) {
+	    issue = ResumePayloadMapper.extractIssue(resume);
+	    if (issue == null) {
+		Map<String, Object> reviewed = asMap(resume.get("reviewed_result"));
+		if (reviewed != null) {
+		    issue = ResumePayloadMapper.extractIssue(reviewed);
+		}
+	    }
+	}
+	return issue;
+    }
+
+    private Map<String, Object> resolveRfiMap(Map<String, Object> data) {
+	Map<String, Object> rfi = asMap(data.get("rfi"));
+	if (rfi != null && !rfi.isEmpty()) {
+	    return rfi;
+	}
+	Map<String, Object> resume = asMap(data.get("resume_payload"));
+	if (resume != null) {
+	    rfi = ResumePayloadMapper.extractRfi(resume);
+	    if (rfi == null) {
+		Map<String, Object> reviewed = asMap(resume.get("reviewed_result"));
+		if (reviewed != null) {
+		    rfi = ResumePayloadMapper.extractRfi(reviewed);
+		}
+	    }
+	}
+	return rfi;
+    }
+
+    private void fillIssue(Map<String, Object> issue) {
+	String type = firstNonBlank(safeStr(issue, "issue_type"), safeStr(issue, "type"),
+		safeStr(issue, "typeId"), safeStr(issue, "description"));
+	String comment = firstNonBlank(safeStr(issue, "issue_comment"), safeStr(issue, "comment"),
+		safeStr(issue, "notes"));
+	if ((type == null || type.isBlank()) && (comment == null || comment.isBlank())) {
+	    PlayTestActionLog.noData("Issue");
+	    return;
+	}
+
+	PlayTestActionLog.step("Issue — issue_type='" + type + "' issue_comment present="
+		+ (comment != null && !comment.isBlank()));
+
+	if (!ensureIssueFormOpen()) {
+	    PlayTestActionLog.skip("Issue", "could not open Issue form (Move to Issue)");
+	    return;
+	}
+
+	if (type != null && !type.isBlank()) {
+	    updateIssueType(type.trim());
+	}
+	if (comment != null && !comment.isBlank()) {
+	    updateIssueComment(comment.trim());
+	}
+    }
+
+    private void fillRfi(Map<String, Object> rfi) {
+	String provider = firstNonBlank(safeStr(rfi, "provider"), safeStr(rfi, "rfi_provider"));
+	String procedure = firstNonBlank(safeStr(rfi, "procedure"), safeStr(rfi, "procedure_code"),
+		safeStr(rfi, "procedureCode"));
+	String reasonsRaw = firstNonBlank(safeStr(rfi, "reasons"), safeStr(rfi, "reason"));
+	String comment = firstNonBlank(safeStr(rfi, "comment"), safeStr(rfi, "rfi_comment"),
+		safeStr(rfi, "notes"));
+	if ((provider == null || provider.isBlank()) && (procedure == null || procedure.isBlank())
+		&& (reasonsRaw == null || reasonsRaw.isBlank())
+		&& (comment == null || comment.isBlank())) {
+	    PlayTestActionLog.noData("RFI");
+	    return;
+	}
+
+	PlayTestActionLog.step("RFI — provider='" + provider + "' procedure='" + procedure
+		+ "' reasons present=" + (reasonsRaw != null && !reasonsRaw.isBlank())
+		+ " comment present=" + (comment != null && !comment.isBlank()));
+
+	if (!ensureRfiFormOpen()) {
+	    PlayTestActionLog.skip("RFI", "could not open RFI form");
+	    return;
+	}
+
+	if (provider != null && !provider.isBlank()) {
+	    setSelect2IfDifferent(RFI_PROVIDER_CHOSEN, RFI_PROVIDER_CHOICE, provider.trim(),
+		    "RFI Provider");
+	}
+	if (procedure != null && !procedure.isBlank()) {
+	    updateRfiProcedure(procedure.trim());
+	}
+	if (reasonsRaw != null && !reasonsRaw.isBlank()) {
+	    updateRfiReasons(reasonsRaw.trim());
+	}
+	if (comment != null && !comment.isBlank()) {
+	    updateRfiComment(comment.trim());
+	}
+    }
+
+    private boolean issueFormVisible() {
+	try {
+	    if (fieldPresent(ISSUE_WELL) || fieldPresent(ISSUE_TYPE_CHOICE)
+		    || fieldPresent(ISSUE_TYPE_SELECT)) {
+		return true;
+	    }
+	    Locator label = page.locator("label.control-label:has-text('Issue Type')").first();
+	    return label.count() > 0 && label.isVisible();
+	} catch (Exception e) {
+	    return false;
+	}
+    }
+
+    private boolean ensureIssueFormOpen() {
+	if (issueFormVisible()) {
+	    return true;
+	}
+	try {
+	    Locator btn = page.locator(MOVE_TO_ISSUE_BUTTON).first();
+	    if (btn.count() == 0 || !btn.isVisible()) {
+		log.warn("Move to Issue button not found/visible");
+		return false;
+	    }
+	    PlayTestActionLog.update("Issue", "clicking Move to Issue");
+	    btn.scrollIntoViewIfNeeded();
+	    btn.click(new Locator.ClickOptions().setForce(true));
+	    for (int i = 0; i < 20; i++) {
+		sleep(150);
+		if (issueFormVisible()) {
+		    log.info("Issue form opened after Move to Issue");
+		    return true;
+		}
+	    }
+	    log.warn("Issue form did not appear after Move to Issue");
+	    return false;
+	} catch (Exception e) {
+	    log.warn("Unable to click Move to Issue: {}", e.getMessage());
+	    return false;
+	}
+    }
+
+    private void updateIssueType(String type) {
+	try {
+	    String current = getPageText(ISSUE_TYPE_CHOSEN);
+	    if (current != null && !current.isBlank()
+		    && current.trim().equalsIgnoreCase(type.trim())) {
+		PlayTestActionLog.skip("Issue Type", current, type);
+		return;
+	    }
+	    if (current != null && !current.isBlank()
+		    && current.toLowerCase().contains(type.toLowerCase())) {
+		PlayTestActionLog.skip("Issue Type", current, type);
+		return;
+	    }
+
+	    PlayTestActionLog.update("Issue Type", "'" + current + "' -> '" + type + "'");
+
+	    Locator nativeSelect = page.locator(ISSUE_TYPE_SELECT).first();
+	    if (nativeSelect.count() > 0) {
+		try {
+		    nativeSelect.selectOption(new SelectOption().setLabel(type));
+		    sleep(200);
+		    syncIssueTypeAngular(type);
+		    log.info("Issue Type set via selectOption label='{}'", type);
+		    return;
+		} catch (Exception ignored) {
+		}
+		try {
+		    nativeSelect.selectOption(new SelectOption().setValue(type));
+		    sleep(200);
+		    syncIssueTypeAngular(type);
+		    log.info("Issue Type set via selectOption value='{}'", type);
+		    return;
+		} catch (Exception ignored) {
+		}
+		// Partial label match on options
+		try {
+		    Locator options = nativeSelect.locator("option");
+		    for (int i = 0; i < options.count(); i++) {
+			String text = options.nth(i).innerText().trim();
+			String value = options.nth(i).getAttribute("value");
+			if (value == null || value.isBlank()) {
+			    continue;
+			}
+			if (text.equalsIgnoreCase(type)
+				|| text.toLowerCase().contains(type.toLowerCase())) {
+			    nativeSelect.selectOption(value);
+			    sleep(200);
+			    syncIssueTypeAngular(value);
+			    log.info("Issue Type set via option value='{}' text='{}'", value, text);
+			    return;
+			}
+		    }
+		} catch (Exception ignored) {
+		}
+	    }
+
+	    // Select2 UI fallback
+	    if (!fieldPresent(ISSUE_TYPE_CHOICE)) {
+		PlayTestActionLog.skip("Issue Type", "field not on form");
+		return;
+	    }
+	    dismissSelect2();
+	    Locator choice = page.locator(ISSUE_TYPE_CHOICE).first();
+	    choice.click(new Locator.ClickOptions().setForce(true));
+	    sleep(300);
+	    Locator search = visibleSelect2Search();
+	    if (search != null) {
+		search.fill(type);
+		sleep(400);
+	    }
+	    Locator option = page.locator(
+		    ".select2-drop:not(.select2-display-none) .select2-results li.select2-result-selectable")
+		    .filter(new Locator.FilterOptions().setHasText(type));
+	    if (option.count() > 0) {
+		option.first().click(new Locator.ClickOptions().setForce(true));
+		sleep(300);
+	    } else if (!selectFirstSelect2Result()) {
+		dismissSelect2();
+		PlayTestActionLog.skip("Issue Type", "no matching option for '" + type + "'");
+	    }
+	} catch (Exception e) {
+	    log.warn("Unable to update Issue Type: {}", e.getMessage());
+	    dismissSelect2();
+	}
+    }
+
+    private void syncIssueTypeAngular(String valueOrLabel) {
+	try {
+	    page.evaluate("(val) => {"
+		    + "  const sel = document.querySelector('#codingissuetype, select[name=\"typeId\"]');"
+		    + "  if (!sel) return;"
+		    + "  const $ = window.jQuery || window.$;"
+		    + "  if ($ && $.fn && $.fn.select2) {"
+		    + "    try { $(sel).val(sel.value).trigger('change'); } catch (e) {}"
+		    + "  }"
+		    + "  sel.dispatchEvent(new Event('input', { bubbles: true }));"
+		    + "  sel.dispatchEvent(new Event('change', { bubbles: true }));"
+		    + "  const ang = window.angular;"
+		    + "  if (ang) {"
+		    + "    try {"
+		    + "      const scope = ang.element(sel).scope();"
+		    + "      if (scope) { scope.$applyAsync(); }"
+		    + "    } catch (e) {}"
+		    + "  }"
+		    + "}", valueOrLabel);
+	} catch (Exception ignored) {
+	}
+    }
+
+    private void updateIssueComment(String comment) {
+	try {
+	    Locator ta = page.locator(ISSUE_COMMENT).first();
+	    if (ta.count() == 0 || !ta.isVisible()) {
+		PlayTestActionLog.skip("Issue Comment", "field not on form");
+		return;
+	    }
+	    String current = "";
+	    try {
+		current = ta.inputValue();
+	    } catch (Exception ignored) {
+	    }
+	    if (valuesMatch(current, comment)) {
+		PlayTestActionLog.skip("Issue Comment", current, comment);
+		return;
+	    }
+	    PlayTestActionLog.update("Issue Comment",
+		    "'" + (current == null ? "" : current) + "' -> '" + comment + "'");
+	    ta.click(new Locator.ClickOptions().setForce(true));
+	    ta.fill("");
+	    ta.fill(comment);
+	    ta.press("Tab");
+	    sleep(200);
+	    log.info("Issue Comment filled ({} chars)", comment.length());
+	} catch (Exception e) {
+	    log.warn("Unable to update Issue Comment: {}", e.getMessage());
+	}
+    }
+
+    private boolean rfiFormVisible() {
+	try {
+	    if (fieldPresent(RFI_WELL) || fieldPresent(RFI_PROVIDER_CHOICE)
+		    || fieldPresent(RFI_COMMENT)) {
+		return true;
+	    }
+	    Locator label = page.locator("label.control-label:has-text('RFI Provider')").first();
+	    return label.count() > 0 && label.isVisible();
+	} catch (Exception e) {
+	    return false;
+	}
+    }
+
+    private boolean ensureRfiFormOpen() {
+	if (rfiFormVisible()) {
+	    return true;
+	}
+	try {
+	    Locator btn = page.locator(RFI_BUTTON).first();
+	    if (btn.count() == 0 || !btn.isVisible()) {
+		log.warn("RFI button not found/visible (may be disabled if Issue is open)");
+		return false;
+	    }
+	    try {
+		if (btn.isDisabled()) {
+		    log.warn("RFI button is disabled");
+		    return false;
+		}
+	    } catch (Exception ignored) {
+	    }
+	    PlayTestActionLog.update("RFI", "clicking RFI button");
+	    btn.scrollIntoViewIfNeeded();
+	    btn.click(new Locator.ClickOptions().setForce(true));
+	    for (int i = 0; i < 20; i++) {
+		sleep(150);
+		if (rfiFormVisible()) {
+		    log.info("RFI form opened after RFI click");
+		    return true;
+		}
+	    }
+	    log.warn("RFI form did not appear after RFI click");
+	    return false;
+	} catch (Exception e) {
+	    log.warn("Unable to click RFI: {}", e.getMessage());
+	    return false;
+	}
+    }
+
+    private void updateRfiProcedure(String procedure) {
+	try {
+	    String want = procedure.trim();
+	    Locator nativeSelect = page.locator(RFI_PROCEDURE_SELECT).first();
+	    if (nativeSelect.count() > 0) {
+		String current = "";
+		try {
+		    current = nativeSelect.inputValue();
+		} catch (Exception ignored) {
+		}
+		if (current != null && current.trim().equalsIgnoreCase(want)) {
+		    PlayTestActionLog.skip("RFI Procedure", current, want);
+		    return;
+		}
+		PlayTestActionLog.update("RFI Procedure",
+			"'" + (current == null ? "" : current) + "' -> '" + want + "'");
+		try {
+		    nativeSelect.selectOption(want);
+		    sleep(200);
+		    syncNativeSelectAngular(nativeSelect);
+		    log.info("RFI Procedure set via selectOption value='{}'", want);
+		    return;
+		} catch (Exception ignored) {
+		}
+		try {
+		    Locator options = nativeSelect.locator("option");
+		    for (int i = 0; i < options.count(); i++) {
+			String text = options.nth(i).innerText().trim();
+			String value = options.nth(i).getAttribute("value");
+			if (value == null || value.isBlank()) {
+			    continue;
+			}
+			if (value.equalsIgnoreCase(want) || text.equalsIgnoreCase(want)
+				|| text.toLowerCase().contains(want.toLowerCase())) {
+			    nativeSelect.selectOption(value);
+			    sleep(200);
+			    syncNativeSelectAngular(nativeSelect);
+			    log.info("RFI Procedure set via option value='{}' text='{}'", value, text);
+			    return;
+			}
+		    }
+		} catch (Exception ignored) {
+		}
+	    }
+
+	    if (!fieldPresent(RFI_PROCEDURE_CHOICE)) {
+		PlayTestActionLog.skip("RFI Procedure", "field not on form");
+		return;
+	    }
+	    dismissSelect2();
+	    Locator choice = page.locator(RFI_PROCEDURE_CHOICE).first();
+	    choice.click(new Locator.ClickOptions().setForce(true));
+	    sleep(300);
+	    Locator search = visibleSelect2Search();
+	    if (search != null) {
+		search.fill(want);
+		sleep(400);
+	    }
+	    Locator option = page.locator(
+		    ".select2-drop:not(.select2-display-none) .select2-results li.select2-result-selectable")
+		    .filter(new Locator.FilterOptions().setHasText(want));
+	    if (option.count() > 0) {
+		option.first().click(new Locator.ClickOptions().setForce(true));
+		sleep(300);
+	    } else if (!selectFirstSelect2Result()) {
+		dismissSelect2();
+		PlayTestActionLog.skip("RFI Procedure", "no matching option for '" + want + "'");
+	    }
+	} catch (Exception e) {
+	    log.warn("Unable to update RFI Procedure: {}", e.getMessage());
+	    dismissSelect2();
+	}
+    }
+
+    private void syncNativeSelectAngular(Locator nativeSelect) {
+	try {
+	    nativeSelect.evaluate("sel => {"
+		    + "  const $ = window.jQuery || window.$;"
+		    + "  if ($ && $.fn && $.fn.select2) {"
+		    + "    try {"
+		    + "      const multi = !!sel.multiple;"
+		    + "      const v = multi"
+		    + "        ? Array.from(sel.selectedOptions || []).map(o => o.value)"
+		    + "        : sel.value;"
+		    + "      $(sel).val(v).trigger('change');"
+		    + "    } catch (e) {}"
+		    + "  }"
+		    + "  sel.dispatchEvent(new Event('input', { bubbles: true }));"
+		    + "  sel.dispatchEvent(new Event('change', { bubbles: true }));"
+		    + "  const ang = window.angular;"
+		    + "  if (ang) {"
+		    + "    try {"
+		    + "      const scope = ang.element(sel).scope();"
+		    + "      if (scope) { scope.$applyAsync(); }"
+		    + "    } catch (e) {}"
+		    + "  }"
+		    + "}");
+	} catch (Exception ignored) {
+	}
+    }
+
+    /**
+     * Sets multi-select reason ids and syncs Select2/Angular with the full array.
+     * Critical: must pass all ids — {@code sel.value} alone keeps only one option.
+     */
+    private void applyRfiReasonIds(java.util.Collection<String> ids) {
+	Locator nativeSelect = page.locator(RFI_REASONS_SELECT).first();
+	if (nativeSelect.count() == 0) {
+	    return;
+	}
+	String[] arr = ids.toArray(new String[0]);
+	try {
+	    if (arr.length == 0) {
+		nativeSelect.evaluate("sel => { sel.selectedIndex = -1; }");
+	    } else {
+		nativeSelect.selectOption(arr);
+	    }
+	} catch (Exception e) {
+	    log.debug("selectOption for RFI reasons failed: {}", e.getMessage());
+	}
+	try {
+	    nativeSelect.evaluate("(sel, idList) => {"
+		    + "  const ids = idList || [];"
+		    + "  for (const opt of Array.from(sel.options || [])) {"
+		    + "    opt.selected = ids.indexOf(opt.value) >= 0;"
+		    + "  }"
+		    + "  const $ = window.jQuery || window.$;"
+		    + "  if ($ && $.fn && $.fn.select2) {"
+		    + "    try { $(sel).val(ids).trigger('change'); } catch (e) {}"
+		    + "  }"
+		    + "  sel.dispatchEvent(new Event('input', { bubbles: true }));"
+		    + "  sel.dispatchEvent(new Event('change', { bubbles: true }));"
+		    + "  const ang = window.angular;"
+		    + "  if (ang) {"
+		    + "    try {"
+		    + "      const scope = ang.element(sel).scope();"
+		    + "      if (scope) {"
+		    + "        if (scope.codingRFI) { scope.codingRFI.reasonIds = ids; }"
+		    + "        scope.$applyAsync();"
+		    + "      }"
+		    + "    } catch (e) {}"
+		    + "  }"
+		    + "}", java.util.Arrays.asList(arr));
+	} catch (Exception e) {
+	    log.warn("applyRfiReasonIds sync failed: {}", e.getMessage());
+	}
+    }
+
+    private void updateRfiReasons(String reasonsRaw) {
+	java.util.ArrayList<String> labels = parseRfiReasonLabels(reasonsRaw);
+	if (labels.isEmpty()) {
+	    PlayTestActionLog.noData("RFI Reasons");
+	    return;
+	}
+	PlayTestActionLog.step("RFI Reasons — " + labels.size() + " value(s): " + labels);
+
+	try {
+	    Locator choices = page.locator(RFI_REASONS_CHOICES).first();
+	    if (choices.count() == 0 || !choices.isVisible()) {
+		PlayTestActionLog.skip("RFI Reasons", "field not on form");
+		return;
+	    }
+
+	    // Accumulate ids across adds — Select2/Angular multi must be set as a full array
+	    java.util.LinkedHashSet<String> selectedIds = readSelectedRfiReasonIds();
+
+	    for (String label : labels) {
+		String already = "";
+		try {
+		    already = choices.innerText();
+		} catch (Exception ignored) {
+		}
+		String alreadyLower = already != null ? already.toLowerCase() : "";
+		if (label != null && alreadyLower.contains(label.toLowerCase())) {
+		    PlayTestActionLog.skip("RFI Reasons", "already has '" + label + "'");
+		    continue;
+		}
+		PlayTestActionLog.update("RFI Reasons", "add '" + label + "'");
+
+		String matchedValue = findRfiReasonOptionValue(label);
+		String matchedText = matchedValue != null ? findRfiReasonOptionText(matchedValue) : null;
+		if (matchedValue != null) {
+		    selectedIds.add(matchedValue);
+		    applyRfiReasonIds(selectedIds);
+		    log.info("RFI Reasons accumulated ids={} (added value='{}' text='{}')", selectedIds,
+			    matchedValue, matchedText);
+		    PlayTestActionLog.update("RFI Reasons",
+			    "matched option '" + (matchedText != null ? matchedText : matchedValue) + "'");
+		    dismissSelect2();
+		    sleep(250);
+		    continue;
+		}
+
+		// Select2 UI fallback (click appends a chip without replacing others)
+		dismissSelect2();
+		choices.click(new Locator.ClickOptions().setForce(true));
+		sleep(200);
+		Locator search = visibleSelect2Search();
+		if (search == null || search.count() == 0) {
+		    search = page.locator(
+			    "xpath=//label[normalize-space()='Reasons']/following::div[contains(@class,'select2-container')][1]//input[contains(@class,'select2-input')]")
+			    .first();
+		}
+		if (search == null || search.count() == 0) {
+		    PlayTestActionLog.skip("RFI Reasons", "Select2 search not visible for '" + label + "'");
+		    dismissSelect2();
+		    continue;
+		}
+		search.fill(label);
+		sleep(700);
+		Locator results = page.locator(SELECT2_RESULTS);
+		Locator match = null;
+		String want = label.toLowerCase();
+		for (int i = 0; i < results.count(); i++) {
+		    String t = results.nth(i).innerText().trim().toLowerCase();
+		    if (t.contains(want) || want.contains(t)) {
+			match = results.nth(i);
+			break;
+		    }
+		}
+		if (match != null) {
+		    match.click(new Locator.ClickOptions().setForce(true));
+		    sleep(250);
+		    selectedIds.addAll(readSelectedRfiReasonIds());
+		} else if (!selectFirstSelect2Result()) {
+		    PlayTestActionLog.skip("RFI Reasons", "no Select2 match for '" + label + "'");
+		    dismissSelect2();
+		} else {
+		    selectedIds.addAll(readSelectedRfiReasonIds());
+		}
+		dismissSelect2();
+		sleep(200);
+	    }
+
+	    // Final ensure: re-apply full id set so UI chips match all selected reasons
+	    if (!selectedIds.isEmpty()) {
+		applyRfiReasonIds(selectedIds);
+		sleep(200);
+		log.info("RFI Reasons final selected ids={}", selectedIds);
+	    }
+	} catch (Exception e) {
+	    log.warn("Unable to update RFI Reasons: {}", e.getMessage());
+	    dismissSelect2();
+	}
+    }
+
+    private java.util.LinkedHashSet<String> readSelectedRfiReasonIds() {
+	java.util.LinkedHashSet<String> vals = new java.util.LinkedHashSet<>();
+	try {
+	    Locator nativeSelect = page.locator(RFI_REASONS_SELECT).first();
+	    if (nativeSelect.count() == 0) {
+		return vals;
+	    }
+	    Object raw = nativeSelect.evaluate(
+		    "sel => Array.from(sel.selectedOptions || []).map(o => o.value)");
+	    if (raw instanceof List<?> list) {
+		for (Object o : list) {
+		    if (o != null && !String.valueOf(o).isBlank()) {
+			vals.add(String.valueOf(o));
+		    }
+		}
+	    }
+	} catch (Exception ignored) {
+	}
+	return vals;
+    }
+
+    /** Best-matching option value for a reason label, or null. */
+    private String findRfiReasonOptionValue(String label) {
+	try {
+	    Locator nativeSelect = page.locator(RFI_REASONS_SELECT).first();
+	    if (nativeSelect.count() == 0) {
+		return null;
+	    }
+	    String want = label.toLowerCase().trim();
+	    Locator options = nativeSelect.locator("option");
+	    int bestScore = 0;
+	    String bestValue = null;
+	    for (int i = 0; i < options.count(); i++) {
+		String text = options.nth(i).innerText().trim();
+		String value = options.nth(i).getAttribute("value");
+		if (value == null || value.isBlank() || text.isBlank()) {
+		    continue;
+		}
+		int score = reasonMatchScore(want, text.toLowerCase());
+		if (score > bestScore) {
+		    bestScore = score;
+		    bestValue = value;
+		}
+	    }
+	    if (bestScore < 2 || bestValue == null) {
+		return null;
+	    }
+	    return bestValue;
+	} catch (Exception e) {
+	    return null;
+	}
+    }
+
+    private String findRfiReasonOptionText(String value) {
+	try {
+	    Locator nativeSelect = page.locator(RFI_REASONS_SELECT).first();
+	    Locator opt = nativeSelect.locator("option[value='" + value + "']").first();
+	    if (opt.count() > 0) {
+		return opt.innerText().trim();
+	    }
+	} catch (Exception ignored) {
+	}
+	return null;
+    }
+
+    /**
+     * Splits {@code reasons} into multiple labels. Supports comma / pipe / semicolon /
+     * newline separators, e.g. {@code "ABN Missing,Assistant Surgeon Role Not Documented"}.
+     * Prefer {@code |} if a single reason text itself contains commas.
+     */
+    private static java.util.ArrayList<String> parseRfiReasonLabels(String reasonsRaw) {
+	java.util.ArrayList<String> labels = new java.util.ArrayList<>();
+	if (reasonsRaw == null || reasonsRaw.isBlank()) {
+	    return labels;
+	}
+	for (String part : reasonsRaw.split("[,|\\n;]+")) {
+	    if (part != null && !part.isBlank()) {
+		labels.add(part.trim());
+	    }
+	}
+	if (labels.isEmpty() && !reasonsRaw.isBlank()) {
+	    labels.add(reasonsRaw.trim());
+	}
+	return labels;
+    }
+
+    /**
+     * Higher score = better match. Exact/contains = 100; otherwise count of shared
+     * significant tokens (length &gt; 3, not stop-ish words).
+     */
+    private static int reasonMatchScore(String wantLower, String optionLower) {
+	if (wantLower == null || optionLower == null || wantLower.isBlank() || optionLower.isBlank()) {
+	    return 0;
+	}
+	if (optionLower.equals(wantLower)) {
+	    return 100;
+	}
+	if (optionLower.contains(wantLower) || wantLower.contains(optionLower)) {
+	    return 90;
+	}
+	String[] wantToks = wantLower.split("[^a-z0-9]+");
+	String[] optToks = optionLower.split("[^a-z0-9]+");
+	java.util.HashSet<String> optSet = new java.util.HashSet<>();
+	for (String t : optToks) {
+	    if (t != null && t.length() > 3) {
+		optSet.add(t);
+	    }
+	}
+	int shared = 0;
+	for (String t : wantToks) {
+	    if (t == null || t.length() <= 3) {
+		continue;
+	    }
+	    if ("role".equals(t) || "not".equals(t) || "documented".equals(t) || "missing".equals(t)
+		    || "needed".equals(t) || "requirements".equals(t)) {
+		continue;
+	    }
+	    if (optSet.contains(t)) {
+		shared++;
+	    }
+	}
+	return shared;
+    }
+
+    private void updateRfiComment(String comment) {
+	try {
+	    Locator ta = page.locator(RFI_COMMENT).first();
+	    if (ta.count() == 0 || !ta.isVisible()) {
+		PlayTestActionLog.skip("RFI Comment", "field not on form");
+		return;
+	    }
+	    String current = "";
+	    try {
+		current = ta.inputValue();
+	    } catch (Exception ignored) {
+	    }
+	    if (valuesMatch(current, comment)) {
+		PlayTestActionLog.skip("RFI Comment", current, comment);
+		return;
+	    }
+	    PlayTestActionLog.update("RFI Comment",
+		    "'" + (current == null ? "" : current) + "' -> '" + comment + "'");
+	    ta.click(new Locator.ClickOptions().setForce(true));
+	    ta.fill("");
+	    ta.fill(comment);
+	    ta.press("Tab");
+	    sleep(200);
+	    log.info("RFI Comment filled ({} chars)", comment.length());
+	} catch (Exception e) {
+	    log.warn("Unable to update RFI Comment: {}", e.getMessage());
+	}
     }
 
     private void updatePatient(Map<String, Object> data) {

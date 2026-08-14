@@ -80,8 +80,12 @@ public class Service {
     }
 
     /**
-     * Syncs CPT rows, then fills modifier / units / diagnosis pointers /
-     * servicelocation per entry. Description is left to Zotec (auto-set when code is chosen).
+     * Clears every existing CPT charge row, then fills CPT rows from JSON in order
+     * (modifier / units / diagnosis pointers / servicelocation / pos). Description is
+     * left to Zotec (auto-set when code is chosen).
+     * <p>
+     * Strategy: delete-all then refill so UI matches JSON (no leftover blank or
+     * stale CPT rows).
      *
      * @param cptEntries ordered CPT maps with {@code code}, optional {@code modifier},
      *                   {@code units}, {@code diagnoses}, {@code servicelocation}, {@code pos}
@@ -104,11 +108,11 @@ public class Service {
 	Set<String> uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values before sync: {}", uiValues);
 
-	// DELETE any UI CPT not present in JSON (including former "protected" EM levels)
-	deleteUnwantedCptRows(page, expectedNormalized);
-
+	// Delete ALL existing CPT rows (filled + blank removable), then refill from JSON
+	PlayTestActionLog.step("CPT — delete all existing rows, then fill from JSON");
+	deleteAllCptRows(page);
 	uiValues = collectCptUiCodes(page);
-	logger.info("CPT UI values after delete: {}", uiValues);
+	logger.info("CPT UI values after delete-all: {}", uiValues);
 
 	for (Map<String, Object> entry : cptEntries) {
 	    String expected = str(entry, "code");
@@ -116,22 +120,20 @@ public class Service {
 		continue;
 	    }
 	    String norm = normalizeCptCode(expected);
-	    if (!uiValues.contains(norm)) {
-		PlayTestActionLog.add("CPT", expected);
-		Locator tempRow = page.locator(CPT_ROWS).last();
-		boolean ok = select2TypeAndChoose(page, tempRow, expected, "CPT " + expected);
-		if (ok) {
-		    uiValues.add(norm);
-		} else {
-		    PlayTestActionLog.skip("CPT " + expected, "select2 did not commit");
-		}
+	    PlayTestActionLog.add("CPT", expected);
+	    Locator tempRow = page.locator(CPT_ROWS).last();
+	    boolean ok = select2TypeAndChoose(page, tempRow, expected, "CPT " + expected);
+	    if (ok) {
+		uiValues.add(norm);
+		Thread.sleep(300);
 	    } else {
-		PlayTestActionLog.skip("CPT", "already present '" + expected + "'");
+		PlayTestActionLog.skip("CPT " + expected, "select2 did not commit");
 	    }
 	}
 
-	// Final pass: remove any leftovers that appeared / failed earlier
+	// Safety: remove any leftover codes not in JSON, and any blank removable rows
 	deleteUnwantedCptRows(page, expectedNormalized);
+	deleteBlankRemovableCptRows(page);
 	uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values after final sync: {}", uiValues);
 	if (!uiValues.equals(expectedNormalized)) {
@@ -1253,9 +1255,107 @@ public class Service {
     }
 
     /**
+     * Removes every removable CPT charge row (filled or blank). The trailing {@code *}
+     * add-row has no removeCharge button and is left alone so new CPTs can be typed in.
+     */
+    private void deleteAllCptRows(Page page) {
+	for (int pass = 0; pass < 15; pass++) {
+	    Locator rows = page.locator(CPT_ROWS);
+	    int rowCount = rows.count();
+	    logger.info("CPT delete-all pass {}: {} row(s), UI codes={}", pass + 1, rowCount,
+		    collectCptUiCodes(page));
+
+	    boolean deletedAny = false;
+	    // Delete from end so indices stay stable; one click per outer pass restart
+	    for (int i = rowCount - 1; i >= 0; i--) {
+		try {
+		    rows = page.locator(CPT_ROWS);
+		    if (i >= rows.count()) {
+			continue;
+		    }
+		    Locator row = rows.nth(i);
+		    Locator removeBtn = findCptRemoveButton(row);
+		    if (removeBtn == null) {
+			continue; // * add-row
+		    }
+		    String value = readCptCode(row);
+		    String label = value.isBlank() ? "(blank)" : value;
+		    PlayTestActionLog.delete("CPT row", label + " (clear-all)");
+		    logger.info("Deleting CPT row '{}' (clear-all)", label);
+		    dismissSelect2(page);
+		    removeBtn.scrollIntoViewIfNeeded();
+		    removeBtn.click(new Locator.ClickOptions().setForce(true));
+		    Thread.sleep(500);
+		    if (findDisableChargeForm(page) != null) {
+			if (!confirmDisableChargeDialog(page, "ABI only")) {
+			    logger.warn("Disable charge dialog not confirmed for CPT {}", label);
+			    PlayTestActionLog.skip("CPT delete " + label, "Disable charge not confirmed");
+			}
+		    }
+		    page.waitForTimeout(400);
+		    deletedAny = true;
+		    break; // re-scan from end after DOM change
+		} catch (Exception e) {
+		    logger.warn("CPT delete-all failed: {}", e.getMessage());
+		}
+	    }
+	    if (!deletedAny) {
+		logger.info("CPT delete-all: no more removable rows");
+		break;
+	    }
+	}
+	logger.info("CPT delete-all finished; remaining UI codes={}", collectCptUiCodes(page));
+    }
+
+    /**
+     * Removes blank (no procedure code) charge rows that still have a remove button —
+     * leftover empty rows that are not the trailing {@code *} add-row.
+     */
+    private void deleteBlankRemovableCptRows(Page page) {
+	for (int pass = 0; pass < 10; pass++) {
+	    Locator rows = page.locator(CPT_ROWS);
+	    boolean deletedAny = false;
+	    for (int i = rows.count() - 1; i >= 0; i--) {
+		try {
+		    rows = page.locator(CPT_ROWS);
+		    if (i >= rows.count()) {
+			continue;
+		    }
+		    Locator row = rows.nth(i);
+		    if (!readCptCode(row).isBlank()) {
+			continue;
+		    }
+		    Locator removeBtn = findCptRemoveButton(row);
+		    if (removeBtn == null) {
+			continue;
+		    }
+		    PlayTestActionLog.delete("CPT row", "(blank leftover)");
+		    logger.info("Deleting blank leftover CPT row");
+		    dismissSelect2(page);
+		    removeBtn.scrollIntoViewIfNeeded();
+		    removeBtn.click(new Locator.ClickOptions().setForce(true));
+		    Thread.sleep(400);
+		    if (findDisableChargeForm(page) != null) {
+			confirmDisableChargeDialog(page, "ABI only");
+		    }
+		    page.waitForTimeout(300);
+		    deletedAny = true;
+		    break;
+		} catch (Exception e) {
+		    logger.warn("Blank CPT delete failed: {}", e.getMessage());
+		}
+	    }
+	    if (!deletedAny) {
+		return;
+	    }
+	}
+    }
+
+    /**
      * Removes every CPT charge row whose procedure code is not in {@code expectedNormalized}.
      * Clicks only {@code removeCharge} (glyphicon-remove) — never other row buttons.
      * Retries until UI codes are a subset of JSON or max passes exhausted.
+     * Blank rows are ignored here; use {@link #deleteBlankRemovableCptRows} / {@link #deleteAllCptRows}.
      */
     private void deleteUnwantedCptRows(Page page, Set<String> expectedNormalized) {
 	for (int pass = 0; pass < 5; pass++) {
