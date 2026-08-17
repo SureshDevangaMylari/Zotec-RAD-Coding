@@ -252,11 +252,9 @@ public class FlowText {
 	    }
 	    dismissDataLockedIfPresent(page);
 	    try {
-		if (reportLoc.count() > 0 && reportLoc.first().isVisible()) {
-		    String text = ps.getText(reportLoc, "getting text");
-		    if (text != null && !text.isBlank()) {
-			return text;
-		    }
+		String text = quietReportText(reportLoc);
+		if (text != null && !text.isBlank()) {
+		    return text;
 		}
 	    } catch (Exception ignored) {
 	    }
@@ -269,6 +267,7 @@ public class FlowText {
     /**
      * Do not click Submit/Skip — wait until the user clicks either button manually.
      * Detects advance when dictated report text changes or the empty-queue banner appears.
+     * Reads report text quietly (no PlaywrightService getText) so logs stay like Flow.
      */
     private SkipAdvanceResult waitForManualSubmitOrSkipAndNext(PlaywrightService ps, Page page,
 	    String previousFingerprint) throws InterruptedException {
@@ -294,14 +293,12 @@ public class FlowText {
 		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
 	    try {
-		if (reportLoc.count() > 0 && reportLoc.first().isVisible()) {
-		    String next = ps.getText(reportLoc, "dictated text after manual action");
-		    if (next != null && !next.isBlank()) {
-			String fp = textFingerprint(next);
-			if (previousFingerprint == null || !fp.equals(previousFingerprint)) {
-			    logger.info("Next patient detected after manual Submit/Skip");
-			    return SkipAdvanceResult.NEXT_PATIENT;
-			}
+		String next = quietReportText(reportLoc);
+		if (next != null && !next.isBlank()) {
+		    String fp = textFingerprint(next);
+		    if (previousFingerprint == null || !fp.equals(previousFingerprint)) {
+			logger.info("Next patient detected after manual Submit/Skip");
+			return SkipAdvanceResult.NEXT_PATIENT;
 		    }
 		}
 	    } catch (Exception ignored) {
@@ -355,13 +352,11 @@ public class FlowText {
 		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
 	    try {
-		if (reportLoc.count() > 0 && reportLoc.first().isVisible()) {
-		    String next = ps.getText(reportLoc, "next dictated text");
-		    if (next != null && !next.isBlank()) {
-			String fp = textFingerprint(next);
-			if (!fp.equals(previousFingerprint)) {
-			    return SkipAdvanceResult.NEXT_PATIENT;
-			}
+		String next = quietReportText(reportLoc);
+		if (next != null && !next.isBlank()) {
+		    String fp = textFingerprint(next);
+		    if (!fp.equals(previousFingerprint)) {
+			return SkipAdvanceResult.NEXT_PATIENT;
 		    }
 		}
 	    } catch (Exception ignored) {
@@ -426,6 +421,22 @@ public class FlowText {
     private static String textFingerprint(String text) {
 	String t = text.trim();
 	return t.substring(0, Math.min(200, t.length()));
+    }
+
+    /**
+     * Read dictated-report text without {@link PlaywrightService#getText} (avoids dumping
+     * the full report into ERROR logs every poll, matching Flow's quiet wait).
+     */
+    private static String quietReportText(Locator reportLoc) {
+	try {
+	    if (reportLoc.count() == 0 || !reportLoc.first().isVisible()) {
+		return null;
+	    }
+	    String text = reportLoc.first().innerText();
+	    return text == null || text.isBlank() ? null : text;
+	} catch (Exception e) {
+	    return null;
+	}
     }
 
     static void saveFile() throws IOException, InterruptedException {

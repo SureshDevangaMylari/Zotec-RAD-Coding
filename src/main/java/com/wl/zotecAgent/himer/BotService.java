@@ -1,12 +1,13 @@
 package com.wl.zotecAgent.himer;
 
-import java.util.List;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import com.microsoft.playwright.*;
+import com.wl.util.BrowserCacheClear;
 import com.wl.zotecAgent.Flow;
+
+import java.util.List;
 
 @Service
 public class BotService {
@@ -26,6 +27,8 @@ public class BotService {
     static BrowserContext context;
     static Page page;
 
+    private static volatile boolean shutdownHookRegistered = false;
+
     // 🔹 START (runs in new thread)
     public void startBot(String agentId) {
 
@@ -35,6 +38,7 @@ public class BotService {
 	}
 
 	running = true;
+	registerShutdownHook();
 
 	botThread = new Thread(() -> {
 	    try {
@@ -52,20 +56,19 @@ public class BotService {
 		context.setDefaultNavigationTimeout(60000);
 		page = context.newPage();
 
-		// 🔥 Your main bot loop
-//		while (running) {
-//		Flow2 f = new Flow2();
+		// A+B: clear session storage + HTTP cache before login/flow
+		BrowserCacheClear.clearSessionAndHttpCache(context);
 
 		flow2.Start(context, agentId);
-//		flow2.Start(context);
-//		}
-		// small sleep to avoid CPU overuse
 		Thread.sleep(1000);
 
 	    } catch (Exception e) {
 		e.printStackTrace();
 	    } finally {
-//		cleanup();
+		try {
+		    BrowserCacheClear.clearSessionAndHttpCache(context);
+		} catch (Exception ignored) {
+		}
 		System.out.println("🛑 Bot Thread Exited");
 	    }
 	});
@@ -77,6 +80,7 @@ public class BotService {
     static void stopBot() {
 	System.out.println("🛑 Bot STOP requested");
 	try {
+	    BrowserCacheClear.clearSessionAndHttpCache(context);
 	    if (page != null)
 		page.close();
 	    if (context != null)
@@ -94,7 +98,7 @@ public class BotService {
 		playwright = null;
 	    }
 	} catch (Exception e) {
-	    // TODO: handle exception
+	    // ignore close races
 	}
 
 	running = false;
@@ -104,6 +108,7 @@ public class BotService {
     // 🔹 CLEANUP
     static void cleanup() {
 	try {
+	    BrowserCacheClear.clearSessionAndHttpCache(context);
 	    if (page != null)
 		page.close();
 	    if (context != null)
@@ -114,6 +119,30 @@ public class BotService {
 		playwright.close();
 	} catch (Exception e) {
 	    e.printStackTrace();
+	} finally {
+	    page = null;
+	    context = null;
+	    browser = null;
+	    playwright = null;
+	}
+    }
+
+    private static void registerShutdownHook() {
+	if (shutdownHookRegistered) {
+	    return;
+	}
+	synchronized (BotService.class) {
+	    if (shutdownHookRegistered) {
+		return;
+	    }
+	    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+		try {
+		    System.out.println("🛑 JVM shutdown — clearing browser cache (A+B)");
+		    BrowserCacheClear.clearSessionAndHttpCache(context);
+		} catch (Exception ignored) {
+		}
+	    }, "himer-bot-browser-cache-clear-shutdown"));
+	    shutdownHookRegistered = true;
 	}
     }
 
