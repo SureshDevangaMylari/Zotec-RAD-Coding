@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -37,14 +38,25 @@ public class AgentPollingService {
     public static String token;
     volatile boolean botRunning = false;
 
+    /** Agent-platform login from active profile ({@code document.auth.*}). */
+    @Value("${document.auth.username}")
+    private String authUsername;
+
+    @Value("${document.auth.password}")
+    private String authPassword;
+
     public AgentPollingService(RestTemplate restTemplate) {
 	this.restTemplate = restTemplate;
     }
 
-    // 🔐 Login once on startup
+    // 🔐 Login once on startup (credentials from active Spring profile)
     @PostConstruct
     public void init() {
-	this.token = login("Umesh.Katakam@waterlabs.ai", "Protocol@123");
+	if (authUsername == null || authUsername.isBlank() || authPassword == null || authPassword.isBlank()) {
+	    throw new IllegalStateException(
+		    "document.auth.username / document.auth.password must be set in the active profile");
+	}
+	this.token = login(authUsername, authPassword);
     }
 
     // ⏱️ Poll every 5 seconds

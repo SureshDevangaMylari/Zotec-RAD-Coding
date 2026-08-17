@@ -15,6 +15,7 @@ import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.options.AriaRole;
 import com.microsoft.playwright.options.SelectOption;
+import com.wl.util.AppProperties;
 import com.wl.util.PlaywrightService;
 
 public class Service {
@@ -28,14 +29,17 @@ public class Service {
     void login(Page page) throws Exception {
 
 	PlaywrightService ps = new PlaywrightService(page);
-	// https://portal.zotecpartners.com/
 
-	page.navigate("https://portal.zotecpartners.com/");
+	String portalUrl = AppProperties.zotecPortalUrl();
+	String username = AppProperties.zotecPortalUsername();
+	String password = AppProperties.zotecPortalPassword();
+
+	page.navigate(portalUrl);
 	ps.fill(page.getByRole(AriaRole.TEXTBOX, new Page.GetByRoleOptions().setName("E-Mail Address")),
-		"jaya.shankar@waterlabs.ai", "filling user name");
+		username, "filling user name");
 
 	ps.click(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Next")), "clicing the next");
-	ps.fill(page.getByRole(AriaRole.TEXTBOX, new Page.GetByRoleOptions().setName("Password")), "Coding@20266f",
+	ps.fill(page.getByRole(AriaRole.TEXTBOX, new Page.GetByRoleOptions().setName("Password")), password,
 		"filling password");
 	ps.click(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Verify")), "clicking verify");
 	Thread.sleep(2000);

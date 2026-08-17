@@ -25,30 +25,31 @@ public final class BrowserCacheClear {
 
     private static final Logger log = LogManager.getLogger(BrowserCacheClear.class);
 
-    /** Origins used by the bot (login + coding workfile). */
-    public static final List<String> DEFAULT_ORIGINS = List.of(
-	    "https://radcoding.zotecpartners.com");
-
     /** CDP Storage.clearDataForOrigin types for option A (sessionStorage via page JS). */
     private static final String STORAGE_TYPES_A = "cookies,local_storage,cache_storage";
 
     private BrowserCacheClear() {
     }
 
+    /** Origins from {@code zotec.portal.URL} in application.properties / active profile. */
+    public static List<String> defaultOrigins() {
+	return List.of(AppProperties.zotecPortalOrigin());
+    }
+
     /**
-     * Clears A+B for {@link #DEFAULT_ORIGINS} using the given context.
+     * Clears A+B for {@link #defaultOrigins()} using the given context.
      *
      * @param context Playwright browser context (may be null)
      */
     public static void clearSessionAndHttpCache(BrowserContext context) {
-	clearSessionAndHttpCache(context, DEFAULT_ORIGINS);
+	clearSessionAndHttpCache(context, defaultOrigins());
     }
 
     /**
      * Clears A+B for the given origins.
      *
      * @param context Playwright browser context (may be null)
-     * @param origins absolute origins, e.g. {@code https://radcoding.zotecpartners.com}
+     * @param origins absolute origins from {@code zotec.portal.URL}
      */
     public static void clearSessionAndHttpCache(BrowserContext context, List<String> origins) {
 	if (context == null) {
@@ -159,7 +160,7 @@ public final class BrowserCacheClear {
 
     private static List<String> normalizeOrigins(List<String> origins) {
 	if (origins == null || origins.isEmpty()) {
-	    return new ArrayList<>(DEFAULT_ORIGINS);
+	    return new ArrayList<>(defaultOrigins());
 	}
 	List<String> out = new ArrayList<>();
 	for (String o : origins) {
@@ -173,7 +174,7 @@ public final class BrowserCacheClear {
 	    }
 	    out.add(trimmed);
 	}
-	return out.isEmpty() ? new ArrayList<>(DEFAULT_ORIGINS) : out;
+	return out.isEmpty() ? new ArrayList<>(defaultOrigins()) : out;
     }
 
     private static String originFromUrl(String url) {
