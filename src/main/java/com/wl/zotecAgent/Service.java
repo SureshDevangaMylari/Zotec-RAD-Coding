@@ -25,6 +25,8 @@ public class Service {
 	    "//*[@ng-controller='Coding.Form.Coding.Professional.Charges.RowController' and @ng-form='rowForm']";
     private static final String ICD_ROWS =
 	    "//*[@ng-controller='Coding.Form.Coding.Professional.Diagnoses.RowController']";
+    /** Placeholder CPT already on the form — keep this row and fill JSON CPTs after it. */
+    private static final String CPT_PLACEHOLDER_CODE = "00000";
 
     void login(Page page) throws Exception {
 
@@ -84,12 +86,12 @@ public class Service {
     }
 
     /**
-     * Clears every existing CPT charge row, then fills CPT rows from JSON in order
-     * (modifier / units / diagnosis pointers / servicelocation / pos). Description is
-     * left to Zotec (auto-set when code is chosen).
+     * Syncs CPT charge rows from JSON (modifier / units / diagnosis pointers /
+     * servicelocation / pos). Description is left to Zotec (auto-set when code is chosen).
      * <p>
-     * Strategy: delete-all then refill so UI matches JSON (no leftover blank or
-     * stale CPT rows).
+     * If CPT {@code 00000} is already on the form, that row is kept and JSON CPTs are filled
+     * starting on the next (trailing {@code *}) row. Otherwise every removable CPT row is
+     * deleted first, then JSON CPTs are filled from the empty add-row.
      *
      * @param cptEntries ordered CPT maps with {@code code}, optional {@code modifier},
      *                   {@code units}, {@code diagnoses}, {@code servicelocation}, {@code pos}
@@ -112,11 +114,17 @@ public class Service {
 	Set<String> uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values before sync: {}", uiValues);
 
-	// Delete ALL existing CPT rows (filled + blank removable), then refill from JSON
-	PlayTestActionLog.step("CPT — delete all existing rows, then fill from JSON");
-	deleteAllCptRows(page);
+	boolean keepPlaceholder = uiValues.contains(CPT_PLACEHOLDER_CODE);
+	if (keepPlaceholder) {
+	    PlayTestActionLog.step("CPT — keep 00000 row; delete other rows, then fill JSON from next row");
+	    logger.info("CPT 00000 present — keeping that row and filling JSON CPTs on the next row");
+	    deleteAllCptRowsExcept(page, CPT_PLACEHOLDER_CODE);
+	} else {
+	    PlayTestActionLog.step("CPT — 00000 not present; delete all existing rows, then fill from JSON");
+	    deleteAllCptRows(page);
+	}
 	uiValues = collectCptUiCodes(page);
-	logger.info("CPT UI values after delete-all: {}", uiValues);
+	logger.info("CPT UI values after pre-fill delete: {}", uiValues);
 
 	for (Map<String, Object> entry : cptEntries) {
 	    String expected = str(entry, "code");
@@ -124,7 +132,12 @@ public class Service {
 		continue;
 	    }
 	    String norm = normalizeCptCode(expected);
+	    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(norm)) {
+		PlayTestActionLog.skip("CPT " + expected, "00000 already on form — kept existing row");
+		continue;
+	    }
 	    PlayTestActionLog.add("CPT", expected);
+	    // Trailing * add-row is always last — that is the next empty row after 00000 (if kept)
 	    Locator tempRow = page.locator(CPT_ROWS).last();
 	    boolean ok = select2TypeAndChoose(page, tempRow, expected, "CPT " + expected);
 	    if (ok) {
@@ -135,13 +148,17 @@ public class Service {
 	    }
 	}
 
-	// Safety: remove any leftover codes not in JSON, and any blank removable rows
-	deleteUnwantedCptRows(page, expectedNormalized);
+	// Safety: remove leftover codes not in JSON (still keep 00000 if we preserved it)
+	Set<String> keepAfterFill = new HashSet<>(expectedNormalized);
+	if (keepPlaceholder) {
+	    keepAfterFill.add(CPT_PLACEHOLDER_CODE);
+	}
+	deleteUnwantedCptRows(page, keepAfterFill);
 	deleteBlankRemovableCptRows(page);
 	uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values after final sync: {}", uiValues);
-	if (!uiValues.equals(expectedNormalized)) {
-	    logger.warn("CPT UI still differs from JSON. UI={} JSON={}", uiValues, expectedNormalized);
+	if (!uiValues.equals(keepAfterFill)) {
+	    logger.warn("CPT UI still differs from JSON. UI={} expected={}", uiValues, keepAfterFill);
 	}
 
 	String formServiceLocationApplied = null;
@@ -1263,10 +1280,20 @@ public class Service {
      * add-row has no removeCharge button and is left alone so new CPTs can be typed in.
      */
     private void deleteAllCptRows(Page page) {
+	deleteAllCptRowsExcept(page, null);
+    }
+
+    /**
+     * Removes every removable CPT charge row except rows whose procedure code matches
+     * {@code keepNormalized} (e.g. {@code 00000}). Blank removable rows are still deleted.
+     * The trailing {@code *} add-row is left so JSON CPTs can be typed on the next row.
+     */
+    private void deleteAllCptRowsExcept(Page page, String keepNormalized) {
+	String keep = keepNormalized == null ? null : normalizeCptCode(keepNormalized);
 	for (int pass = 0; pass < 15; pass++) {
 	    Locator rows = page.locator(CPT_ROWS);
 	    int rowCount = rows.count();
-	    logger.info("CPT delete-all pass {}: {} row(s), UI codes={}", pass + 1, rowCount,
+	    logger.info("CPT delete-all pass {}: {} row(s), keep={}, UI codes={}", pass + 1, rowCount, keep,
 		    collectCptUiCodes(page));
 
 	    boolean deletedAny = false;
@@ -1283,6 +1310,10 @@ public class Service {
 			continue; // * add-row
 		    }
 		    String value = readCptCode(row);
+		    if (keep != null && !value.isBlank() && keep.equals(normalizeCptCode(value))) {
+			PlayTestActionLog.skip("CPT row", "keeping '" + value + "' (placeholder)");
+			continue;
+		    }
 		    String label = value.isBlank() ? "(blank)" : value;
 		    PlayTestActionLog.delete("CPT row", label + " (clear-all)");
 		    logger.info("Deleting CPT row '{}' (clear-all)", label);
@@ -1304,7 +1335,7 @@ public class Service {
 		}
 	    }
 	    if (!deletedAny) {
-		logger.info("CPT delete-all: no more removable rows");
+		logger.info("CPT delete-all: no more removable rows" + (keep != null ? " except " + keep : ""));
 		break;
 	    }
 	}
