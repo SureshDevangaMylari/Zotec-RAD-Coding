@@ -1,6 +1,7 @@
 package com.wl.zotecAgent;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +28,8 @@ public class Service {
 	    "//*[@ng-controller='Coding.Form.Coding.Professional.Diagnoses.RowController']";
     /** Placeholder CPT already on the form — keep this row and fill JSON CPTs after it. */
     private static final String CPT_PLACEHOLDER_CODE = "00000";
+    /** Disable-charge reason when removing UI CPTs that are not in JSON. */
+    private static final String CPT_DISABLE_REASON_NOT_IN_JSON = "NRC - Flouro used in OR";
 
     void login(Page page) throws Exception {
 
@@ -89,9 +92,11 @@ public class Service {
      * Syncs CPT charge rows from JSON (modifier / units / diagnosis pointers /
      * servicelocation / pos). Description is left to Zotec (auto-set when code is chosen).
      * <p>
-     * If CPT {@code 00000} is already on the form, that row is kept and JSON CPTs are filled
-     * starting on the next (trailing {@code *}) row. Otherwise every removable CPT row is
-     * deleted first, then JSON CPTs are filled from the empty add-row.
+     * {@code 00000} on the form is left as-is. Each following row that already has a CPT is
+     * overwritten with the next JSON CPT (not deleted). When a row has no CPT, remaining
+     * JSON CPTs are added. Extra UI CPTs not in JSON are then deleted with disable reason
+     * {@code NRC - Flouro used in OR}. Final UI matches JSON, plus {@code 00000} if it was
+     * already present.
      *
      * @param cptEntries ordered CPT maps with {@code code}, optional {@code modifier},
      *                   {@code units}, {@code diagnoses}, {@code servicelocation}, {@code pos}
@@ -116,16 +121,12 @@ public class Service {
 
 	boolean keepPlaceholder = uiValues.contains(CPT_PLACEHOLDER_CODE);
 	if (keepPlaceholder) {
-	    PlayTestActionLog.step("CPT — keep 00000 row; delete other rows, then fill JSON from next row");
-	    logger.info("CPT 00000 present — keeping that row and filling JSON CPTs on the next row");
-	    deleteAllCptRowsExcept(page, CPT_PLACEHOLDER_CODE);
+	    logger.info("CPT 00000 present — keeping that row as-is; overwrite/add JSON CPTs on following rows");
 	} else {
-	    PlayTestActionLog.step("CPT — 00000 not present; delete all existing rows, then fill from JSON");
-	    deleteAllCptRows(page);
+	    logger.info("CPT 00000 not present — overwrite existing rows then add remaining JSON CPTs");
 	}
-	uiValues = collectCptUiCodes(page);
-	logger.info("CPT UI values after pre-fill delete: {}", uiValues);
 
+	List<String> jsonCodesToFill = new ArrayList<>();
 	for (Map<String, Object> entry : cptEntries) {
 	    String expected = str(entry, "code");
 	    if (expected == null) {
@@ -136,24 +137,16 @@ public class Service {
 		PlayTestActionLog.skip("CPT " + expected, "00000 already on form — kept existing row");
 		continue;
 	    }
-	    PlayTestActionLog.add("CPT", expected);
-	    // Trailing * add-row is always last — that is the next empty row after 00000 (if kept)
-	    Locator tempRow = page.locator(CPT_ROWS).last();
-	    boolean ok = select2TypeAndChoose(page, tempRow, expected, "CPT " + expected);
-	    if (ok) {
-		uiValues.add(norm);
-		Thread.sleep(300);
-	    } else {
-		PlayTestActionLog.skip("CPT " + expected, "select2 did not commit");
-	    }
+	    jsonCodesToFill.add(expected);
 	}
 
-	// Safety: remove leftover codes not in JSON (still keep 00000 if we preserved it)
+	syncCptCodesFromJson(page, jsonCodesToFill, keepPlaceholder);
+
 	Set<String> keepAfterFill = new HashSet<>(expectedNormalized);
 	if (keepPlaceholder) {
 	    keepAfterFill.add(CPT_PLACEHOLDER_CODE);
 	}
-	deleteUnwantedCptRows(page, keepAfterFill);
+	deleteUnwantedCptRows(page, jsonCodesToFill, keepPlaceholder);
 	deleteBlankRemovableCptRows(page);
 	uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values after final sync: {}", uiValues);
@@ -1276,6 +1269,60 @@ public class Service {
     }
 
     /**
+     * Walks CPT rows in order: keep {@code 00000}; overwrite each existing CPT with the next
+     * JSON code; when a row has no CPT, add remaining JSON codes (typically the trailing {@code *}).
+     */
+    private void syncCptCodesFromJson(Page page, List<String> jsonCodes, boolean keepPlaceholder)
+	    throws InterruptedException {
+	int jsonIdx = 0;
+	int rowIndex = 0;
+	while (jsonIdx < jsonCodes.size()) {
+	    Locator rows = page.locator(CPT_ROWS);
+	    int count = rows.count();
+	    if (count == 0) {
+		logger.warn("CPT sync: no charge rows on form");
+		break;
+	    }
+	    if (rowIndex >= count) {
+		rowIndex = count - 1;
+	    }
+	    Locator row = rows.nth(rowIndex);
+	    String value = readCptCode(row);
+	    String valueNorm = value.isBlank() ? "" : normalizeCptCode(value);
+	    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(valueNorm)) {
+		PlayTestActionLog.skip("CPT row", "keeping 00000 as-is");
+		rowIndex++;
+		continue;
+	    }
+
+	    String jsonCode = jsonCodes.get(jsonIdx);
+	    String jsonNorm = normalizeCptCode(jsonCode);
+	    if (!valueNorm.isBlank() && jsonNorm.equals(valueNorm)) {
+		PlayTestActionLog.skip("CPT " + jsonCode, "already on this row");
+		jsonIdx++;
+		rowIndex++;
+		continue;
+	    }
+
+	    if (!valueNorm.isBlank()) {
+		PlayTestActionLog.update("CPT row", "'" + value + "' -> '" + jsonCode + "'");
+		logger.info("Overwriting CPT '{}' with JSON '{}'", value, jsonCode);
+	    } else {
+		PlayTestActionLog.add("CPT", jsonCode);
+		logger.info("Adding CPT '{}' (no code on this row)", jsonCode);
+	    }
+	    boolean ok = select2TypeAndChoose(page, row, jsonCode, "CPT " + jsonCode);
+	    if (!ok) {
+		PlayTestActionLog.skip("CPT " + jsonCode, "select2 did not commit");
+	    } else {
+		Thread.sleep(300);
+	    }
+	    jsonIdx++;
+	    rowIndex++;
+	}
+    }
+
+    /**
      * Removes every removable CPT charge row (filled or blank). The trailing {@code *}
      * add-row has no removeCharge button and is left alone so new CPTs can be typed in.
      */
@@ -1387,28 +1434,59 @@ public class Service {
     }
 
     /**
-     * Removes every CPT charge row whose procedure code is not in {@code expectedNormalized}.
-     * Clicks only {@code removeCharge} (glyphicon-remove) — never other row buttons.
-     * Retries until UI codes are a subset of JSON or max passes exhausted.
-     * Blank rows are ignored here; use {@link #deleteBlankRemovableCptRows} / {@link #deleteAllCptRows}.
+     * Removes CPT rows that are not part of JSON (beyond allowed counts). {@code 00000} is
+     * kept when it was already on the form. Disable reason:
+     * {@link #CPT_DISABLE_REASON_NOT_IN_JSON}.
      */
-    private void deleteUnwantedCptRows(Page page, Set<String> expectedNormalized) {
+    private void deleteUnwantedCptRows(Page page, List<String> jsonCodes, boolean keepPlaceholder) {
+	Map<String, Integer> allowed = new HashMap<>();
+	for (String code : jsonCodes) {
+	    String n = normalizeCptCode(code);
+	    if (!n.isBlank()) {
+		allowed.merge(n, 1, Integer::sum);
+	    }
+	}
+	Set<String> expectedNormalized = new HashSet<>(allowed.keySet());
+	if (keepPlaceholder) {
+	    expectedNormalized.add(CPT_PLACEHOLDER_CODE);
+	}
+
 	for (int pass = 0; pass < 5; pass++) {
 	    Locator rows = page.locator(CPT_ROWS);
 	    int rowCount = rows.count();
-	    Set<String> before = collectCptUiCodes(page);
-	    logger.info("CPT delete pass {}: UI={} JSON keep={}", pass + 1, before, expectedNormalized);
-
-	    // Already clean?
-	    if (before.isEmpty() || expectedNormalized.containsAll(before)) {
-		logger.info("CPT delete: UI codes already within JSON set");
+	    Map<String, Integer> remaining = new HashMap<>(allowed);
+	    List<Integer> extraIndexes = new ArrayList<>();
+	    for (int i = 0; i < rowCount; i++) {
+		try {
+		    String value = readCptCode(rows.nth(i));
+		    if (value.isBlank()) {
+			continue;
+		    }
+		    String norm = normalizeCptCode(value);
+		    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(norm)) {
+			continue;
+		    }
+		    int left = remaining.getOrDefault(norm, 0);
+		    if (left > 0) {
+			remaining.put(norm, left - 1);
+		    } else {
+			extraIndexes.add(i);
+		    }
+		} catch (Exception ignored) {
+		}
+	    }
+	    logger.info("CPT delete pass {}: UI={} JSON keep={} extraRows={}", pass + 1,
+		    collectCptUiCodes(page), expectedNormalized, extraIndexes.size());
+	    if (extraIndexes.isEmpty()) {
+		logger.info("CPT delete: no leftover rows outside JSON");
 		return;
 	    }
 
 	    boolean deletedAny = false;
-	    for (int i = rowCount - 1; i >= 0; i--) {
+	    for (int x = extraIndexes.size() - 1; x >= 0; x--) {
 		try {
 		    rows = page.locator(CPT_ROWS);
+		    int i = extraIndexes.get(x);
 		    if (i >= rows.count()) {
 			continue;
 		    }
@@ -1417,14 +1495,10 @@ public class Service {
 		    if (value.isBlank()) {
 			continue;
 		    }
-		    String norm = normalizeCptCode(value);
-		    if (expectedNormalized.contains(norm)) {
-			PlayTestActionLog.skip("CPT row", "keeping '" + value + "' (in JSON)");
-			continue;
-		    }
 
 		    PlayTestActionLog.delete("CPT row", value + " (not in JSON)");
-		    logger.info("Deleting CPT '{}' — not present in JSON", value);
+		    logger.info("Deleting CPT '{}' — not present in JSON (reason: {})", value,
+			    CPT_DISABLE_REASON_NOT_IN_JSON);
 		    dismissSelect2(page);
 
 		    Locator removeBtn = findCptRemoveButton(row);
@@ -1437,21 +1511,14 @@ public class Service {
 		    removeBtn.click(new Locator.ClickOptions().setForce(true));
 		    Thread.sleep(500);
 
-		    // Disable-charge modal: set native select reason so OK enables, then click OK
-		    if (!confirmDisableChargeDialog(page, "ABI only")) {
+		    if (!confirmDisableChargeDialog(page, CPT_DISABLE_REASON_NOT_IN_JSON)) {
 			logger.warn("Disable charge dialog not confirmed for CPT {}", value);
 			PlayTestActionLog.skip("CPT delete " + value, "Disable charge not confirmed");
 		    }
 		    page.waitForTimeout(500);
-
-		    // Confirm this code is gone (or count dropped)
-		    Set<String> after = collectCptUiCodes(page);
-		    if (!after.contains(norm)) {
-			logger.info("CPT '{}' deleted successfully", value);
-			deletedAny = true;
-		    } else {
-			logger.warn("CPT '{}' still present after delete attempt", value);
-		    }
+		    logger.info("CPT '{}' delete attempted", value);
+		    deletedAny = true;
+		    break; // re-scan after DOM change
 		} catch (Exception e) {
 		    logger.warn("CPT delete failed: {}", e.getMessage());
 		}
@@ -2199,8 +2266,14 @@ public class Service {
 
     private static String[] reasonPrefs(String preferred) {
 	if (preferred != null && !preferred.isBlank()) {
-	    return new String[] { preferred.trim(), "ABI only", "0-Code Assist Deletion", "Incorrect CPT Code",
-		    "Duplicate" };
+	    String p = preferred.trim();
+	    // User spelling is "Flouro"; portal may use "Fluoro"
+	    if (p.toLowerCase(Locale.ROOT).contains("flouro") || p.toLowerCase(Locale.ROOT).contains("fluoro")) {
+		return new String[] { p, "NRC - Flouro used in OR", "NRC - Fluoro used in OR",
+			"NRC - Fluoroscopy used in OR", "ABI only", "0-Code Assist Deletion", "Incorrect CPT Code",
+			"Duplicate" };
+	    }
+	    return new String[] { p, "ABI only", "0-Code Assist Deletion", "Incorrect CPT Code", "Duplicate" };
 	}
 	return new String[] { "ABI only", "0-Code Assist Deletion", "Incorrect CPT Code", "Duplicate" };
     }
