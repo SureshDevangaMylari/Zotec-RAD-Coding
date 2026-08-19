@@ -515,8 +515,9 @@ public final class ResumePayloadMapper {
     }
 
     /**
-     * Ordered CPT rows from JSON ({@code code}, {@code modifier}, {@code units},
+     * Ordered CPT rows from JSON {@code cpt} only ({@code code}, {@code modifier}, {@code units},
      * {@code diagnoses}, {@code description}, {@code servicelocation}, {@code pos}).
+     * Does not add {@code ed.em_cpt_code} or inferred critical-care CPTs.
      */
     @SuppressWarnings("unchecked")
     public static List<Map<String, Object>> extractCptEntries(Map<String, Object> resumePayload) {
@@ -525,101 +526,53 @@ public final class ResumePayloadMapper {
         if (root.isEmpty()) {
             return entries;
         }
-        Set<String> seen = new HashSet<>();
         Object cptObj = root.get("cpt");
-        if (cptObj instanceof List<?> list) {
-            for (Object item : list) {
-                if (!(item instanceof Map<?, ?> m)) {
-                    continue;
-                }
-                Map<String, Object> raw = (Map<String, Object>) m;
-                String code = firstStr(raw, "code", "cpt_code");
-                if (code == null) {
-                    continue;
-                }
-                Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put("code", code.trim());
-                String modifier = firstStr(raw, "modifier", "modifiers");
-                if (modifier != null) {
-                    entry.put("modifier", modifier.trim());
-                }
-                Object units = raw.get("units");
-                if (raw.containsKey("units")) {
-                    // Keep null so Service can apply Zotec-required default "1"
-                    if (units != null && !"null".equalsIgnoreCase(String.valueOf(units).trim())) {
-                        entry.put("units", units);
-                    } else {
-                        entry.put("units", null);
-                    }
-                }
-                String diagnoses = firstStr(raw, "diagnoses", "diagnosis", "dx");
-                if (diagnoses != null) {
-                    entry.put("diagnoses", diagnoses.trim());
-                }
-                String description = firstStr(raw, "description", "desc");
-                if (description != null) {
-                    entry.put("description", description.trim());
-                }
-                String serviceLocation = firstStr(raw, "servicelocation", "service_location", "serviceLocation");
-                if (serviceLocation != null) {
-                    entry.put("servicelocation", serviceLocation.trim());
-                }
-                String pos = firstStr(raw, "pos", "pos_code", "place_of_service", "placeOfService");
-                if (pos != null) {
-                    entry.put("pos", pos.trim());
-                }
-                entries.add(entry);
-                seen.add(code.trim());
-            }
+        if (!(cptObj instanceof List<?> list)) {
+            return entries;
         }
-        Map<String, Object> ed = asMap(root.get("ed"));
-        if (ed != null) {
-            String em = str(ed, "em_cpt_code");
-            if (em != null && !seen.contains(em.trim())) {
-                Map<String, Object> entry = new LinkedHashMap<>();
-                entry.put("code", em.trim());
-                entries.add(entry);
-                seen.add(em.trim());
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> m)) {
+                continue;
             }
-        }
-        String ccCpt = criticalCareCptCode(root.get("critical_care"));
-        if (ccCpt != null && !seen.contains(ccCpt)) {
+            Map<String, Object> raw = (Map<String, Object>) m;
+            String code = firstStr(raw, "code", "cpt_code");
+            if (code == null) {
+                continue;
+            }
             Map<String, Object> entry = new LinkedHashMap<>();
-            entry.put("code", ccCpt);
-            entry.put("description", "Critical Care");
+            entry.put("code", code.trim());
+            String modifier = firstStr(raw, "modifier", "modifiers");
+            if (modifier != null) {
+                entry.put("modifier", modifier.trim());
+            }
+            Object units = raw.get("units");
+            if (raw.containsKey("units")) {
+                // Keep null so Service can apply Zotec-required default "1"
+                if (units != null && !"null".equalsIgnoreCase(String.valueOf(units).trim())) {
+                    entry.put("units", units);
+                } else {
+                    entry.put("units", null);
+                }
+            }
+            String diagnoses = firstStr(raw, "diagnoses", "diagnosis", "dx");
+            if (diagnoses != null) {
+                entry.put("diagnoses", diagnoses.trim());
+            }
+            String description = firstStr(raw, "description", "desc");
+            if (description != null) {
+                entry.put("description", description.trim());
+            }
+            String serviceLocation = firstStr(raw, "servicelocation", "service_location", "serviceLocation");
+            if (serviceLocation != null) {
+                entry.put("servicelocation", serviceLocation.trim());
+            }
+            String pos = firstStr(raw, "pos", "pos_code", "place_of_service", "placeOfService");
+            if (pos != null) {
+                entry.put("pos", pos.trim());
+            }
             entries.add(entry);
         }
         return entries;
-    }
-
-    /** Maps non-null critical_care payload to a CPT code (default 99291). */
-    private static String criticalCareCptCode(Object cc) {
-        if (cc == null || "null".equalsIgnoreCase(String.valueOf(cc).trim())) {
-            return null;
-        }
-        if (cc instanceof Map<?, ?> m) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> map = (Map<String, Object>) m;
-            String code = firstStr(map, "code", "cpt", "cpt_code", "em_cpt_code");
-            if (code != null) {
-                return code.trim();
-            }
-            return "99291";
-        }
-        if (cc instanceof Boolean b) {
-            return b ? "99291" : null;
-        }
-        String s = String.valueOf(cc).trim();
-        if (s.isEmpty() || "false".equalsIgnoreCase(s) || "no".equalsIgnoreCase(s)) {
-            return null;
-        }
-        if (s.matches("\\d{5}")) {
-            return s;
-        }
-        if ("true".equalsIgnoreCase(s) || "yes".equalsIgnoreCase(s)) {
-            return "99291";
-        }
-        return "99291";
     }
 
     @SuppressWarnings("unchecked")

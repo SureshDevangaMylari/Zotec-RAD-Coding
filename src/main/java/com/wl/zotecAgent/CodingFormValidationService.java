@@ -1801,10 +1801,10 @@ public class CodingFormValidationService {
 	    PlayTestActionLog.skip("Critical Care", "payload present but no CPT code inferred — no UI field");
 	    return;
 	}
-	// Stash for callers / logging; CPT row is filled by Service.validateCPT
+	// Stash for callers / logging; charge-grid CPT rows come only from JSON "cpt"
 	data.put("_critical_care_cpt", code);
 	PlayTestActionLog.skip("Critical Care",
-		"no dedicated UI field; CPT '" + code + "' should be applied via validateCPT");
+		"no dedicated UI field; CPT rows are filled from JSON cpt[] only (not em_cpt_code)");
     }
 
     private String resolveCriticalCareCpt(Object cc) {
