@@ -12,8 +12,8 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 /**
- * On {@link ApplicationReadyEvent}, launches Chrome and runs {@link Flow#Start}
- * (same Playwright setup as legacy {@link Init2}).
+ * On {@link ApplicationReadyEvent}, launches Chrome with the user profile (CDP)
+ * and runs {@link FlowText#Start} via {@link BotService#startBot}.
  */
 @Component
 @ConditionalOnProperty(name = "flow.auto-start", havingValue = "true", matchIfMissing = true)
