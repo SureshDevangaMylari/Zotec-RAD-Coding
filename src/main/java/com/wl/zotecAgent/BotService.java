@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -33,7 +34,8 @@ public class BotService {
     /** For legacy static {@link #stopBot()} callers (AgentPollingService). */
     private static volatile BotService instance;
 
-    private final FlowText flowText;
+	private final Flow flow;
+	private final FlowText flowText;
 
     @Value("${flow.agent-id:698ae5c9b0bf82d7668c29c8}")
     private String defaultAgentId;
@@ -65,10 +67,14 @@ public class BotService {
     private Page page;
     private Process chromeProcess;
 
-    public BotService(FlowText flowText) {
-	this.flowText = flowText;
-	instance = this;
-    }
+	private volatile String activeChartType;
+	private volatile List<String> activeClients = List.of();
+
+	public BotService(Flow flow, FlowText flowText) {
+		this.flow = flow;
+		this.flowText = flowText;
+		instance = this;
+	}
 
     public boolean isRunning() {
 	return running;
@@ -78,47 +84,81 @@ public class BotService {
 	return stopRequested;
     }
 
-    /**
+	public String getActiveChartType() {
+		return activeChartType;
+	}
+
+	public List<String> getActiveClients() {
+		return activeClients == null ? List.of() : List.copyOf(activeClients);
+	}
+
+
+	/**
      * Entry used by {@link FlowStartupRunner} / agent polling — launches Chrome with
      * the user profile (extensions kept) via CDP, then runs FlowText.
      */
     public void startBot(List<?> data, String bulkId, String agentId) {
-	if (running) {
-	    log.warn("Bot already running");
-	    return;
+		startBotFromUi("Text", AllowedClients.orderedEntries(), agentId);
+    }
+
+	public synchronized boolean startBotFromUi(String chartType, List<String> clients) {
+		return startBotFromUi(chartType, clients, defaultAgentId);
 	}
 
-	final String aid = (agentId != null && !agentId.isBlank()) ? agentId : defaultAgentId;
 
-	running = true;
-	stopRequested = false;
-
-	botThread = new Thread(() -> {
-	    try {
-		log.info("Bot STARTED agentId={} bulkId={}", aid, bulkId);
-
-		playwright = Playwright.create();
-		launchChromeWithUserProfile();
-
-		log.info("Chrome attached — continuing to FlowText");
-		flowText.Start(context, aid);
-		Thread.sleep(1000);
-	    } catch (Exception e) {
-		if (!stopRequested) {
-		    log.error("Bot run failed", e);
-		} else {
-		    log.info("Bot stopped: {}", e.getMessage());
+	public synchronized boolean startBotFromUi(String chartType, List<String> clients, String agentId) {
+		if (running) {
+			log.warn("Bot already running");
+			return false;
 		}
-	    } finally {
-		cleanup();
-		running = false;
-		stopRequested = false;
-		log.info("Bot Thread Exited");
-	    }
-	}, "zotec-bot");
+		if (clients == null || clients.isEmpty()) {
+			log.warn("No clients provided — refuse start");
+			return false;
+		}
 
-	botThread.start();
-    }
+		final String type = chartType != null ? chartType.trim() : "Text";
+		final List<String> selected = Collections.unmodifiableList(new ArrayList<>(clients));
+		final String aid = (agentId != null && !agentId.isBlank()) ? agentId : defaultAgentId;
+
+		running = true;
+		stopRequested = false;
+		activeChartType = type;
+		activeClients = selected;
+
+		botThread = new Thread(() -> {
+			try {
+				log.info("Bot STARTED chartType={} clients={}", type, selected.size());
+
+				playwright = Playwright.create();
+				launchChromeWithUserProfile();
+
+				log.info("Logging into Zotec and continuing Flow (chartType={})", type);
+				if ("Image".equalsIgnoreCase(type)) {
+					flow.Start(context, aid, selected);
+				} else {
+					flowText.Start(context, aid, selected);
+				}
+				Thread.sleep(1000);
+			} catch (Exception e) {
+				if (!stopRequested) {
+					log.error("Bot run failed", e);
+				} else {
+					log.info("Bot stopped: {}", e.getMessage());
+				}
+			} finally {
+				cleanup();
+				running = false;
+				stopRequested = false;
+				activeChartType = null;
+				activeClients = List.of();
+				log.info("Bot Thread Exited");
+			}
+		}, "zotec-bot");
+
+		botThread.start();
+		return true;
+	}
+
 
     /**
      * Windows: real Chrome User Data + detached CDP.

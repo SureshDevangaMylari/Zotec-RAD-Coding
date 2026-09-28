@@ -21,9 +21,9 @@ import com.wl.util.PlaywrightService;
 
 /**
  * Image-based coding flow: page images → PDF upload → review → fill form.
- * Walks each Select client(s) location that shows a {@code badge-warning} (image reports)
- * badge — one checkbox at a time; unchecks when patients for that location are done.
- * Patient looping and manual Submit/Skip match {@link FlowText}.
+ * Walks UI-selected clients (or {@link AllowedClients} when none provided);
+ * skips entries missing from Select client(s) {@code badge-warning} checkboxes.
+ * Patient looping: after fill, bot clicks Submit if enabled else Skip.
  * <p>
  * RAD portal has no ED supplemental form — after patient details, fills ICD/CPT only.
  */
@@ -41,45 +41,82 @@ public class Flow {
 
     /** Image Flow uses orange badge-warning (image report counts). */
     private static final String LOCATION_BADGE = ClientLocationSelector.BADGE_WARNING;
+    private static final String SELECT_CLIENTS_TOGGLE =
+	    "a.dropdown-toggle[ng-click*='refreshLocationFilter']";
     private static final String NO_MORE_REPORTS =
 	    "There are no more reports to view based on your filters";
     private static final String REPORT_COMPLETED = "This report has been completed.";
     private static final String DATA_LOCKED_TITLE = "Data Locked";
     private static final String DATA_LOCKED_BODY =
 	    "The data cannot be submitted because it is locked for edit by another user";
+    /** Image charts: refresh hospital review UI twice after upload. */
+    private static final int REVIEW_UI_REFRESH_COUNT = 2;
 
     private final ZotecService zs;
     private final DocumentProcessingService documentProcessing;
+    private final HospitalReviewUiSession reviewUi;
 
     @Autowired
-    public Flow(ZotecService zs, DocumentProcessingService documentProcessing) {
+    public Flow(ZotecService zs, DocumentProcessingService documentProcessing,
+	    HospitalReviewUiSession reviewUi) {
 	this.zs = zs;
 	this.documentProcessing = documentProcessing;
+	this.reviewUi = reviewUi;
     }
 
     public void Start(BrowserContext context, String agentId) throws Exception {
-	Page page = context.newPage();
+	Start(context, agentId, null);
+    }
+
+    /**
+     * @param selectedClients client labels from the frontend UI; when null/empty falls back to
+     *                        {@link AllowedClients#orderedEntries()}
+     */
+    public void Start(BrowserContext context, String agentId, List<String> selectedClients)
+	    throws Exception {
+	Page page = resolveWorkfilePage(context);
 	try {
 	    PlaywrightService ps = new PlaywrightService(page);
 
-	    zs.login(page);
-	    Thread.sleep(5000);
+	    if (isSelectClientsToggleVisible(page)) {
+		logger.info("Skipped Zotec login — Select client(s) already visible");
+		Thread.sleep(1000);
+	    } else {
+		zs.login(page);
+		Thread.sleep(5000);
+	    }
 
 	    ClientLocationSelector.openClientSelector(ps, page, LOCATION_BADGE);
-	    List<String> locationKeys = ClientLocationSelector.collectLocationKeys(page, LOCATION_BADGE);
-	    logger.info("Found {} image-location checkbox(es) with {} badge", locationKeys.size(),
-		    LOCATION_BADGE);
+	    List<String> uiLabels = ClientLocationSelector.collectUiLabels(page, LOCATION_BADGE);
+	    logger.info("Found {} image-badge client checkbox(es) in Select client(s)", uiLabels.size());
 
-	    for (int li = 0; li < locationKeys.size(); li++) {
-		String locationKey = locationKeys.get(li);
-		logger.info("Location [{}/{}]: selecting '{}'", li + 1, locationKeys.size(), locationKey);
+	    List<String> allowlist = (selectedClients != null && !selectedClients.isEmpty())
+		    ? selectedClients
+		    : AllowedClients.orderedEntries();
+	    java.util.Set<Integer> usedUiIndexes = new java.util.HashSet<>();
+	    logger.info("Walking {} client entr(y/ies) from UI/allowlist (skip if missing from portal)",
+		    allowlist.size());
+
+	    for (int a = 0; a < allowlist.size(); a++) {
+		String allowEntry = allowlist.get(a);
+		int clientIndex = AllowedClients.findMatchingUiIndex(allowEntry, uiLabels, usedUiIndexes);
+		if (clientIndex < 0) {
+		    logger.info("Allowlist [{}/{}]: '{}' — not in Select client(s), skipping",
+			    a + 1, allowlist.size(), allowEntry);
+		    continue;
+		}
+		usedUiIndexes.add(clientIndex);
+		String locationKey = ClientLocationSelector.locationKeyAt(page, LOCATION_BADGE, clientIndex);
+		logger.info("Allowlist [{}/{}]: '{}' — matched UI checkbox [{}] '{}' key={}",
+			a + 1, allowlist.size(), allowEntry, clientIndex, uiLabels.get(clientIndex),
+			locationKey);
 
 		String selectedClientLocation;
 		try {
 		    selectedClientLocation = ClientLocationSelector.selectOnlyAndApply(ps, page,
 			    LOCATION_BADGE, locationKey);
 		} catch (Exception e) {
-		    logger.warn("Could not select location '{}' — skipping: {}", locationKey, e.getMessage());
+		    logger.warn("Could not select location '{}' — skipping: {}", allowEntry, e.getMessage());
 		    continue;
 		}
 		logger.info("Selected client_location for upload metadata: {}", selectedClientLocation);
@@ -89,15 +126,14 @@ public class Flow {
 
 		while (true) {
 		    if (hasNoMoreReportsMessage(page)) {
-			logger.info("UI: no more reports for '{}' — uncheck and next location",
-				locationKey);
+			logger.info("UI: no more reports for allowlist '{}' — next location", allowEntry);
 			break;
 		    }
 
 		    dismissDataLockedIfPresent(page);
 
 		    patientIndex++;
-		    logger.info("--- Patient #{} under '{}' (image/PDF) ---", patientIndex, locationKey);
+		    logger.info("--- Patient #{} under '{}' (image/PDF) ---", patientIndex, allowEntry);
 
 		    if (!waitForPatientImagesReady(page)) {
 			if (hasNoMoreReportsMessage(page)) {
@@ -132,8 +168,9 @@ public class Flow {
 
 		    if (hasReportCompletedMessage(page)) {
 			logger.info("UI: This report has been completed — Skip to next patient ('{}')",
-				locationKey);
-			SkipAdvanceResult completedSkip = clickSkipAndWaitForNext(ps, page, previousFingerprint);
+				allowEntry);
+			SkipAdvanceResult completedSkip = clickSkipAndWaitForNext(ps, page,
+				previousFingerprint);
 			if (completedSkip == SkipAdvanceResult.NO_MORE_REPORTS) {
 			    break;
 			}
@@ -142,30 +179,23 @@ public class Flow {
 
 		    boolean processed = processOnePatient(page, selectedClientLocation);
 		    if (!processed) {
-			logger.error("Patient #{} failed — waiting for manual Submit/Skip", patientIndex);
+			logger.error("Patient #{} failed — clicking Skip if possible", patientIndex);
 		    }
 
-		    SkipAdvanceResult advance = waitForManualSubmitOrSkipAndNext(ps, page, previousFingerprint);
+		    SkipAdvanceResult advance = clickSubmitOrSkipAndWaitForNext(ps, page, previousFingerprint);
 		    if (advance == SkipAdvanceResult.NO_MORE_REPORTS) {
-			logger.info("No more patients for '{}' — uncheck and next location", locationKey);
+			logger.info("No more patients for '{}' — next allowlist location", allowEntry);
 			break;
 		    }
 		    if (advance == SkipAdvanceResult.TIMEOUT) {
 			logger.warn(
-				"Manual Submit/Skip wait timed out — stay on '{}'; will retry next loop",
-				locationKey);
+				"Submit/Skip advance timed out — stay on '{}'; will retry next loop",
+				allowEntry);
 		    }
-		}
-
-		try {
-		    ClientLocationSelector.uncheckAllAndApply(ps, page, LOCATION_BADGE);
-		    logger.info("Unchecked location '{}' after patients completed", locationKey);
-		} catch (Exception e) {
-		    logger.warn("Could not uncheck location '{}': {}", locationKey, e.getMessage());
 		}
 	    }
 
-	    logger.info("All badge-warning (image) locations processed (image Flow)");
+	    logger.info("All selected/allowlist locations processed (image Flow)");
 	    page.pause();
 
 	} catch (Exception e) {
@@ -175,7 +205,36 @@ public class Flow {
     }
 
     /**
-     * Collect page images → PDF upload (with well + client_location metadata) → fill form.
+     * Prefer an existing tab that already shows the Select client(s) toggle;
+     * otherwise open a new page for login / navigate.
+     */
+    private Page resolveWorkfilePage(BrowserContext context) {
+	for (Page existing : context.pages()) {
+	    try {
+		Locator toggle = existing.locator(SELECT_CLIENTS_TOGGLE).first();
+		if (toggle.count() > 0 && toggle.isVisible()) {
+		    logger.info("Reusing existing tab with Select client(s) toggle visible");
+		    existing.bringToFront();
+		    return existing;
+		}
+	    } catch (Exception e) {
+		// try next tab
+	    }
+	}
+	return context.newPage();
+    }
+
+    private boolean isSelectClientsToggleVisible(Page page) {
+	try {
+	    Locator toggle = page.locator(SELECT_CLIENTS_TOGGLE).first();
+	    return toggle.count() > 0 && toggle.isVisible();
+	} catch (Exception e) {
+	    return false;
+	}
+    }
+
+    /**
+     * Collect page images → PDF upload → hospital review UI → poll resume → fill form.
      */
     private boolean processOnePatient(Page page, String selectedClientLocation)
 	    throws Exception {
@@ -190,7 +249,12 @@ public class Flow {
 	}
 
 	Map<String, Object> uploadMetadata = WorkfileSummaryScraper.build(page, selectedClientLocation);
-	Map<String, Object> uploadMeta = documentProcessing.uploadPdfAndAwaitResume(page, uploadMetadata);
+	Map<String, Object> uploadMeta = documentProcessing.uploadPdfAndAwaitResume(page, uploadMetadata,
+		() -> {
+		    reviewUi.ensureOpenAndLoggedIn(page.context());
+		    reviewUi.refreshAwaitStartAndSubmitReview(REVIEW_UI_REFRESH_COUNT);
+		    page.bringToFront();
+		});
 
 	@SuppressWarnings("unchecked")
 	Map<String, Object> resumePayload = uploadMeta.get("resume_payload") instanceof Map
@@ -211,6 +275,7 @@ public class Flow {
 
 	logger.info("Resume payload received for document_id={}", uploadMeta.get("document_id"));
 
+	page.bringToFront();
 	zs.validatePatientDetails(page, patientInfo);
 
 	if (dismissDataLockedIfPresent(page)) {
@@ -232,6 +297,8 @@ public class Flow {
 		CodingFormValidationService formSvc = new CodingFormValidationService(page);
 		formSvc.updateBillingExtras(patientInfo);
 		formSvc.updateIssueOrRfi(patientInfo);
+
+	ZtecVerifierGate.dismissYesIDidIfPresent(page);
 
 	if (dismissDataLockedIfPresent(page)) {
 	    logger.info("Data Locked after CPT/ICD — OK clicked, move to next patient");
@@ -286,46 +353,61 @@ public class Flow {
     }
 
     /**
-     * Do not click Submit/Skip — wait until the user clicks either button manually.
-     * Detects advance when page images change or the empty-queue banner appears.
+     * After fill: click Submit if enabled, otherwise Skip. Waits for next patient fingerprint.
      */
-    private SkipAdvanceResult waitForManualSubmitOrSkipAndNext(PlaywrightService ps, Page page,
+    private SkipAdvanceResult clickSubmitOrSkipAndWaitForNext(PlaywrightService ps, Page page,
 	    String previousFingerprint) throws InterruptedException {
 	if (hasNoMoreReportsMessage(page)) {
 	    return SkipAdvanceResult.NO_MORE_REPORTS;
 	}
 
+	page.bringToFront();
 	dismissDataLockedIfPresent(page);
+	ZtecVerifierGate.dismissYesIDidIfPresent(page);
 
-	logger.info(
-		"Waiting for USER to click Submit or Skip manually — bot will not click either button");
+	Locator submitBtn = page.getByRole(AriaRole.BUTTON,
+		new Page.GetByRoleOptions().setName("Submit").setExact(true));
+	boolean submitEnabled = false;
+	try {
+	    submitEnabled = submitBtn.count() > 0 && submitBtn.first().isEnabled()
+		    && submitBtn.first().isVisible();
+	} catch (Exception e) {
+	    logger.warn("Could not read Submit enabled state: {}", e.getMessage());
+	}
 
-	for (int attempt = 0; attempt < 3600; attempt++) {
+	if (submitEnabled) {
+	    logger.info("Submit enabled — clicking Submit → next patient");
+	    ps.click(submitBtn.first(), "Submit → next patient");
+	    Thread.sleep(3000);
+	    return waitForFingerprintAdvance(page, previousFingerprint, "Submit");
+	}
+
+	logger.info("Submit missing/disabled — clicking Skip");
+	return clickSkipAndWaitForNext(ps, page, previousFingerprint);
+    }
+
+    private SkipAdvanceResult waitForFingerprintAdvance(Page page, String previousFingerprint, String action)
+	    throws InterruptedException {
+	for (int attempt = 0; attempt < 60; attempt++) {
 	    if (dismissDataLockedIfPresent(page)) {
-		logger.info("Data Locked while waiting for manual Submit/Skip — OK clicked; continue waiting");
+		logger.info("Data Locked after {} — OK clicked; waiting for next patient", action);
 		Thread.sleep(2000);
 		continue;
 	    }
 	    if (hasNoMoreReportsMessage(page)) {
-		logger.info("No more reports after manual Submit/Skip");
+		logger.info("No more reports after {}", action);
 		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
 	    try {
 		String fp = pageImageFingerprint(page);
-		if (fp != null && !fp.isBlank()
-			&& (previousFingerprint == null || !fp.equals(previousFingerprint))) {
-		    logger.info("Next patient detected after manual Submit/Skip (image fingerprint changed)");
+		if (fp != null && !fp.isBlank() && !fp.equals(previousFingerprint)) {
 		    return SkipAdvanceResult.NEXT_PATIENT;
 		}
 	    } catch (Exception ignored) {
 	    }
-	    if (attempt > 0 && attempt % 30 == 0) {
-		logger.info("Still waiting for manual Submit/Skip... ({}s)", attempt);
-	    }
 	    Thread.sleep(1000);
 	}
-
-	logger.warn("Timed out waiting for manual Submit/Skip — stay on checkbox (do not advance)");
+	logger.warn("Timed out waiting for next patient after {} — stay on checkbox", action);
 	return SkipAdvanceResult.TIMEOUT;
     }
 
@@ -336,8 +418,13 @@ public class Flow {
 	}
 
 	dismissDataLockedIfPresent(page);
+	ZtecVerifierGate.dismissYesIDidIfPresent(page);
 
 	Locator skipBtn = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Skip"));
+	if (skipBtn.count() == 0 || !skipBtn.first().isEnabled()) {
+	    ZtecVerifierGate.dismissYesIDidIfPresent(page);
+	    skipBtn = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Skip"));
+	}
 	if (skipBtn.count() == 0 || !skipBtn.first().isEnabled()) {
 	    if (hasNoMoreReportsMessage(page)) {
 		return SkipAdvanceResult.NO_MORE_REPORTS;
@@ -350,29 +437,7 @@ public class Flow {
 
 	ps.click(skipBtn.first(), "Skip → next patient");
 	Thread.sleep(3000);
-
-	for (int attempt = 0; attempt < 60; attempt++) {
-	    if (dismissDataLockedIfPresent(page)) {
-		logger.info("Data Locked after Skip — OK clicked; waiting for page refresh / next patient");
-		Thread.sleep(2000);
-		continue;
-	    }
-	    if (hasNoMoreReportsMessage(page)) {
-		logger.info("No more reports after Skip");
-		return SkipAdvanceResult.NO_MORE_REPORTS;
-	    }
-	    try {
-		String fp = pageImageFingerprint(page);
-		if (fp != null && !fp.isBlank() && !fp.equals(previousFingerprint)) {
-		    return SkipAdvanceResult.NEXT_PATIENT;
-		}
-	    } catch (Exception ignored) {
-	    }
-	    Thread.sleep(1000);
-	}
-
-	logger.warn("Timed out waiting for next patient after Skip — stay on checkbox (do not advance)");
-	return SkipAdvanceResult.TIMEOUT;
+	return waitForFingerprintAdvance(page, previousFingerprint, "Skip");
     }
 
     private boolean dismissDataLockedIfPresent(Page page) {

@@ -378,6 +378,56 @@ final class ClientLocationSelector {
 	}
     }
 
+    /**
+     * Snapshot checkbox labels (id + display text) for allowlist matching via
+     * {@link AllowedClients#findMatchingUiIndex}.
+     */
+    static List<String> collectUiLabels(Page page, String badgeKind) {
+	String xpath = checkboxXpath(badgeKind);
+	Locator boxes = page.locator(xpath);
+	int n = boxes.count();
+	List<String> labels = new ArrayList<>(n);
+	for (int i = 0; i < n; i++) {
+	    labels.add(readClientLabel(boxes.nth(i)));
+	}
+	return labels;
+    }
+
+    /**
+     * Stable key for the nth badge checkbox (used with {@link #selectOnlyAndApply}).
+     */
+    static String locationKeyAt(Page page, String badgeKind, int index) {
+	Locator boxes = page.locator(checkboxXpath(badgeKind));
+	if (index < 0 || index >= boxes.count()) {
+	    throw new IllegalStateException("Client index out of range: " + index + " (size="
+		    + boxes.count() + ")");
+	}
+	return locationKey(boxes.nth(index));
+    }
+
+    /** Label text + checkbox id for allowlist matching (name and/or code in parentheses). */
+    static String readClientLabel(Locator checkbox) {
+	StringBuilder sb = new StringBuilder();
+	try {
+	    String id = checkbox.getAttribute("id");
+	    if (id != null && !id.isBlank()) {
+		sb.append(id).append(' ');
+	    }
+	} catch (Exception ignored) {
+	}
+	try {
+	    Locator label = checkbox.locator("xpath=ancestor::label[1]");
+	    if (label.count() > 0) {
+		sb.append(label.first().innerText());
+	    } else {
+		sb.append(checkbox.locator("xpath=..").innerText());
+	    }
+	} catch (Exception e) {
+	    log.warn("Could not read client label: {}", e.getMessage());
+	}
+	return sb.toString().trim();
+    }
+
     private static Locator findByKey(Page page, String xpath, String locationKey) {
 	Locator boxes = page.locator(xpath);
 	int n = boxes.count();
@@ -394,7 +444,7 @@ final class ClientLocationSelector {
     }
 
     /** Prefer checkbox id; fall back to cleaned display label. */
-    private static String locationKey(Locator checkbox) {
+    static String locationKey(Locator checkbox) {
 	try {
 	    String id = checkbox.getAttribute("id");
 	    if (id != null && !id.isBlank()) {

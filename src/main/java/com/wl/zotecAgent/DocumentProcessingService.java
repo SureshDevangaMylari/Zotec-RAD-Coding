@@ -45,6 +45,15 @@ public class DocumentProcessingService {
      * @param uploadMetadata well + Select client(s) {@code client_location}; may be null/empty
      */
     public Map<String, Object> uploadPdfAndAwaitResume(Page page, Map<String, Object> uploadMetadata) {
+        return uploadPdfAndAwaitResume(page, uploadMetadata, null);
+    }
+
+    /**
+     * Same as {@link #uploadPdfAndAwaitResume(Page, Map)} but runs {@code afterUploadBeforePoll}
+     * after queue cleanup and before HTTP review poll (e.g. hospital review UI Submit review).
+     */
+    public Map<String, Object> uploadPdfAndAwaitResume(Page page, Map<String, Object> uploadMetadata,
+            ReviewUiHook afterUploadBeforePoll) {
         Map<String, Object> result = new LinkedHashMap<>();
         try {
             List<ImagePdfUploadService.PageImage> images = imagePdfUploadService.collectImagesFromPage(page);
@@ -76,6 +85,8 @@ public class DocumentProcessingService {
             log.info("Upload record_id={} — clearing document queue then polling review", recordId);
             documentQueueCleanupService.clearQueuedDocumentsExcept(recordId);
 
+            runReviewUiHook(afterUploadBeforePoll);
+
             Map<String, Object> reviewResult = recordReviewPollingService.reviewUploadPdf(recordId);
             result.put("review_result", reviewResult);
             result.put("review_response", reviewResult.get("review_response"));
@@ -104,7 +115,21 @@ public class DocumentProcessingService {
 
     /** Backward-compatible: upload PDF with no metadata. */
     public Map<String, Object> uploadPdfAndAwaitResume(Page page) {
-        return uploadPdfAndAwaitResume(page, null);
+        return uploadPdfAndAwaitResume(page, null, null);
+    }
+
+    /** Hook run after chart upload / queue cleanup and before review poll. */
+    @FunctionalInterface
+    public interface ReviewUiHook {
+        void run() throws Exception;
+    }
+
+    private void runReviewUiHook(ReviewUiHook hook) throws Exception {
+        if (hook == null) {
+            return;
+        }
+        log.info("Running hospital review UI hook before review poll");
+        hook.run();
     }
 
     /**
@@ -113,6 +138,15 @@ public class DocumentProcessingService {
      * @param uploadMetadata well + Select client(s) {@code client_location}; may be null/empty
      */
     public Map<String, Object> uploadTextAndAwaitResume(String text, Map<String, Object> uploadMetadata) {
+        return uploadTextAndAwaitResume(text, uploadMetadata, null);
+    }
+
+    /**
+     * Same as {@link #uploadTextAndAwaitResume(String, Map)} but runs {@code afterUploadBeforePoll}
+     * after queue cleanup and before HTTP review poll.
+     */
+    public Map<String, Object> uploadTextAndAwaitResume(String text, Map<String, Object> uploadMetadata,
+            ReviewUiHook afterUploadBeforePoll) {
         Map<String, Object> result = new LinkedHashMap<>();
         try {
             if (text == null || text.isBlank()) {
@@ -143,6 +177,8 @@ public class DocumentProcessingService {
             log.info("Upload record_id={} — clearing document queue then polling review", recordId);
             documentQueueCleanupService.clearQueuedDocumentsExcept(recordId);
 
+            runReviewUiHook(afterUploadBeforePoll);
+
             Map<String, Object> reviewResult = recordReviewPollingService.reviewUploadPdf(recordId);
             result.put("review_result", reviewResult);
             result.put("review_response", reviewResult.get("review_response"));
@@ -170,7 +206,7 @@ public class DocumentProcessingService {
 
     /** Backward-compatible: upload text with no metadata. */
     public Map<String, Object> uploadTextAndAwaitResume(String text) {
-        return uploadTextAndAwaitResume(text, null);
+        return uploadTextAndAwaitResume(text, null, null);
     }
 
     private String resolveRecordId(Map<String, Object> uploadResult, String fallbackBaseName) {
