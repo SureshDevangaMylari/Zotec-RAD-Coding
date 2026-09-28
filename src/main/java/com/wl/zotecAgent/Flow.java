@@ -363,7 +363,7 @@ public class Flow {
 
 	page.bringToFront();
 	dismissDataLockedIfPresent(page);
-	ZtecVerifierGate.dismissYesIDidIfPresent(page);
+	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
 	Locator submitBtn = page.getByRole(AriaRole.BUTTON,
 		new Page.GetByRoleOptions().setName("Submit").setExact(true));
@@ -377,6 +377,7 @@ public class Flow {
 
 	if (submitEnabled) {
 	    logger.info("Submit enabled — clicking Submit → next patient");
+	    ZtecVerifierGate.dismissYesIDidIfPresent(page);
 	    ps.click(submitBtn.first(), "Submit → next patient");
 	    Thread.sleep(3000);
 	    return waitForFingerprintAdvance(page, previousFingerprint, "Submit");
@@ -418,7 +419,7 @@ public class Flow {
 	}
 
 	dismissDataLockedIfPresent(page);
-	ZtecVerifierGate.dismissYesIDidIfPresent(page);
+	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
 	Locator skipBtn = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Skip"));
 	if (skipBtn.count() == 0 || !skipBtn.first().isEnabled()) {
