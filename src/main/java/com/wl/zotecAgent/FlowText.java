@@ -345,6 +345,11 @@ public class FlowText {
 	dismissDataLockedIfPresent(page);
 	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
+	if (isAccidentDateBlank(page)) {
+	    logger.info("Accident Date is blank — refreshing page for next chart (skip Submit/Skip)");
+	    return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
+	}
+
 	boolean submitEnabled = isButtonEnabled(page, "Submit", true);
 	boolean skipEnabled = isButtonEnabled(page, "Skip", false);
 
@@ -425,6 +430,11 @@ public class FlowText {
 	dismissDataLockedIfPresent(page);
 	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
+	if (isAccidentDateBlank(page)) {
+	    logger.info("Accident Date is blank before Skip — refreshing page for next chart");
+	    return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
+	}
+
 	Locator skipBtn = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Skip"));
 	if (skipBtn.count() == 0 || !skipBtn.first().isEnabled()) {
 	    ZtecVerifierGate.dismissYesIDidIfPresent(page);
@@ -455,6 +465,27 @@ public class FlowText {
 	    Locator btn = page.getByRole(AriaRole.BUTTON, opts);
 	    return btn.count() > 0 && btn.first().isVisible() && btn.first().isEnabled();
 	} catch (Exception e) {
+	    return false;
+	}
+    }
+
+    /**
+     * True when Accident Date ({@code #accidentDate}) is on screen and empty — form requires it
+     * after an accident ICD; blank means we should refresh and move on.
+     */
+    private boolean isAccidentDateBlank(Page page) {
+	try {
+	    Locator loc = page.locator(FormSelectors.ACCIDENT_DATE).first();
+	    if (loc.count() == 0 || !loc.isVisible()) {
+		return false;
+	    }
+	    String value = loc.inputValue();
+	    if (value == null || value.isBlank()) {
+		value = loc.getAttribute("value");
+	    }
+	    return value == null || value.isBlank();
+	} catch (Exception e) {
+	    logger.warn("Could not read Accident Date: {}", e.getMessage());
 	    return false;
 	}
     }
