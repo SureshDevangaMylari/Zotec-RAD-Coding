@@ -48,6 +48,7 @@ public class FlowText {
     private static final String DATA_LOCKED_TITLE = "Data Locked";
     private static final String DATA_LOCKED_BODY =
 	    "The data cannot be submitted because it is locked for edit by another user";
+    private static final String VALIDATION_ERROR_TITLE = "Validation Error";
     /** Text charts: refresh hospital review UI once after upload. */
     private static final int REVIEW_UI_REFRESH_COUNT = 1;
 
@@ -331,7 +332,8 @@ public class FlowText {
     }
 
     /**
-     * After fill: click Submit if enabled, otherwise Skip. Waits for next dictated report.
+     * After fill: click Submit if enabled, otherwise Skip. If both disabled, refresh for next chart.
+     * After Submit/Skip, Validation Error → OK + refresh → next chart.
      */
     private SkipAdvanceResult clickSubmitOrSkipAndWaitForNext(PlaywrightService ps, Page page,
 	    String previousFingerprint) throws InterruptedException {
@@ -343,21 +345,27 @@ public class FlowText {
 	dismissDataLockedIfPresent(page);
 	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
-	Locator submitBtn = page.getByRole(AriaRole.BUTTON,
-		new Page.GetByRoleOptions().setName("Submit").setExact(true));
-	boolean submitEnabled = false;
-	try {
-	    submitEnabled = submitBtn.count() > 0 && submitBtn.first().isEnabled()
-		    && submitBtn.first().isVisible();
-	} catch (Exception e) {
-	    logger.warn("Could not read Submit enabled state: {}", e.getMessage());
+	boolean submitEnabled = isButtonEnabled(page, "Submit", true);
+	boolean skipEnabled = isButtonEnabled(page, "Skip", false);
+
+	if (!submitEnabled && !skipEnabled) {
+	    logger.info("Submit and Skip both disabled — refreshing page for next chart");
+	    return refreshPageForNextChart(page, previousFingerprint, "both Submit/Skip disabled");
 	}
 
 	if (submitEnabled) {
 	    logger.info("Submit enabled — clicking Submit → next patient");
 	    ZtecVerifierGate.dismissYesIDidIfPresent(page);
+	    Locator submitBtn = page.getByRole(AriaRole.BUTTON,
+		    new Page.GetByRoleOptions().setName("Submit").setExact(true));
 	    ps.click(submitBtn.first(), "Submit → next patient");
 	    Thread.sleep(3000);
+	    if (handleOverrideEditAndConfirm(page, 12)) {
+		return waitForTextAdvance(page, previousFingerprint, "Override Edit Confirm");
+	    }
+	    if (handleValidationErrorByRefresh(page)) {
+		return waitForTextAdvance(page, previousFingerprint, "Validation Error refresh");
+	    }
 	    return waitForTextAdvance(page, previousFingerprint, "Submit");
 	}
 
@@ -369,6 +377,16 @@ public class FlowText {
 	    throws InterruptedException {
 	Locator reportLoc = page.locator("//*[@id='dictated-report-text']");
 	for (int attempt = 0; attempt < 60; attempt++) {
+	    if (handleOverrideEditAndConfirm(page, 1)) {
+		logger.info("Override Edit handled after {} — waiting for next chart", action);
+		Thread.sleep(2000);
+		continue;
+	    }
+	    if (handleValidationErrorByRefresh(page)) {
+		logger.info("Validation Error after {} — refreshed; waiting for next chart", action);
+		Thread.sleep(2000);
+		continue;
+	    }
 	    if (dismissDataLockedIfPresent(page)) {
 		logger.info("Data Locked after {} — OK clicked; waiting for next patient", action);
 		Thread.sleep(2000);
@@ -397,7 +415,6 @@ public class FlowText {
     /**
      * Click bottom Skip and wait for the next patient report.
      * {@link SkipAdvanceResult#NO_MORE_REPORTS} is the only signal to leave the checkbox.
-     * Timeout / Data Locked → dismiss OK and keep trying; do not advance checkbox.
      */
     private SkipAdvanceResult clickSkipAndWaitForNext(PlaywrightService ps, Page page, String previousFingerprint)
 	    throws InterruptedException {
@@ -417,15 +434,171 @@ public class FlowText {
 	    if (hasNoMoreReportsMessage(page)) {
 		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
-	    logger.info("Skip button missing or disabled — waiting (not leaving checkbox)");
-	    Thread.sleep(3000);
-	    dismissDataLockedIfPresent(page);
-	    return SkipAdvanceResult.TIMEOUT;
+	    logger.info("Skip button missing or disabled (and Submit not usable) — refreshing for next chart");
+	    return refreshPageForNextChart(page, previousFingerprint, "Skip disabled");
 	}
 
 	ps.click(skipBtn.first(), "Skip → next patient");
 	Thread.sleep(3000);
+	if (handleValidationErrorByRefresh(page)) {
+	    return waitForTextAdvance(page, previousFingerprint, "Validation Error refresh");
+	}
 	return waitForTextAdvance(page, previousFingerprint, "Skip");
+    }
+
+    private boolean isButtonEnabled(Page page, String name, boolean exact) {
+	try {
+	    Page.GetByRoleOptions opts = new Page.GetByRoleOptions().setName(name);
+	    if (exact) {
+		opts.setExact(true);
+	    }
+	    Locator btn = page.getByRole(AriaRole.BUTTON, opts);
+	    return btn.count() > 0 && btn.first().isVisible() && btn.first().isEnabled();
+	} catch (Exception e) {
+	    return false;
+	}
+    }
+
+    /**
+     * After Submit: if coding-edits wizard shows "Override Edit & Submit as Coded",
+     * select it then click Confirm so the next chart can load.
+     *
+     * @param pollAttempts how many 500ms checks to wait for the option (use higher right after Submit)
+     * @return true if the override option was found and Confirm was clicked
+     */
+    private boolean handleOverrideEditAndConfirm(Page page, int pollAttempts) throws InterruptedException {
+	try {
+	    Locator optionLink = null;
+	    int attempts = Math.max(1, pollAttempts);
+	    for (int i = 0; i < attempts; i++) {
+		Locator label = page.locator("label.ng-binding, label").filter(
+			new Locator.FilterOptions().setHasText("Override Edit & Submit as Coded"));
+		if (label.count() > 0 && label.first().isVisible()) {
+		    optionLink = label.first().locator("xpath=ancestor::a[1]");
+		    if (optionLink.count() == 0) {
+			optionLink = page.locator("a[ng-click*='selectOption']").filter(
+				new Locator.FilterOptions().setHasText("Override Edit & Submit as Coded"));
+		    }
+		    break;
+		}
+		Locator byText = page.getByText("Override Edit & Submit as Coded");
+		if (byText.count() > 0 && byText.first().isVisible()) {
+		    optionLink = byText.first().locator("xpath=ancestor::a[1]");
+		    break;
+		}
+		if (i + 1 < attempts) {
+		    Thread.sleep(500);
+		}
+	    }
+	    if (optionLink == null || optionLink.count() == 0) {
+		return false;
+	    }
+	    try {
+		if (!optionLink.first().isVisible()) {
+		    return false;
+		}
+	    } catch (Exception e) {
+		return false;
+	    }
+
+	    logger.info("Coding edit screen — clicking 'Override Edit & Submit as Coded'");
+	    try {
+		optionLink.first().click(new Locator.ClickOptions().setTimeout(10_000));
+	    } catch (Exception e) {
+		logger.warn("Normal click on Override option failed ({}) — force click", e.getMessage());
+		optionLink.first().click(new Locator.ClickOptions().setForce(true).setTimeout(10_000));
+	    }
+	    Thread.sleep(1500);
+
+	    Locator confirm = page.locator("button.btn-summary-confirm").first();
+	    long deadline = System.currentTimeMillis() + 30_000;
+	    while (System.currentTimeMillis() < deadline) {
+		try {
+		    if (confirm.count() > 0 && confirm.isVisible()) {
+			break;
+		    }
+		} catch (Exception ignored) {
+		}
+		Locator byRole = page.getByRole(AriaRole.BUTTON,
+			new Page.GetByRoleOptions().setName("Confirm"));
+		if (byRole.count() > 0 && byRole.first().isVisible()) {
+		    confirm = byRole.first();
+		    break;
+		}
+		Thread.sleep(500);
+	    }
+	    if (confirm.count() == 0 || !confirm.isVisible()) {
+		logger.warn("'Override Edit & Submit as Coded' clicked but Confirm not found");
+		return false;
+	    }
+	    logger.info("Clicking Confirm on coding-edits summary");
+	    try {
+		confirm.click(new Locator.ClickOptions().setTimeout(10_000));
+	    } catch (Exception e) {
+		confirm.click(new Locator.ClickOptions().setForce(true).setTimeout(10_000));
+	    }
+	    Thread.sleep(3000);
+	    return true;
+	} catch (Exception e) {
+	    logger.warn("handleOverrideEditAndConfirm: {}", e.getMessage());
+	    return false;
+	}
+    }
+
+    /**
+     * Validation Error modal → click OK (#alertok) → reload page so next chart loads.
+     *
+     * @return true if the modal was found and page was refreshed
+     */
+    private boolean handleValidationErrorByRefresh(Page page) throws InterruptedException {
+	try {
+	    Locator title = page.locator("h4.modal-title").filter(
+		    new Locator.FilterOptions().setHasText(VALIDATION_ERROR_TITLE));
+	    boolean visible = false;
+	    try {
+		visible = title.count() > 0 && title.first().isVisible();
+	    } catch (Exception ignored) {
+	    }
+	    if (!visible) {
+		Locator byText = page.getByText(VALIDATION_ERROR_TITLE);
+		visible = byText.count() > 0 && byText.first().isVisible();
+	    }
+	    if (!visible) {
+		return false;
+	    }
+	    logger.info("Validation Error dialog detected — clicking OK then refreshing page");
+	    Locator ok = page.locator("#alertok");
+	    if (ok.count() == 0 || !ok.first().isVisible()) {
+		ok = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("OK"));
+	    }
+	    if (ok.count() > 0) {
+		ok.first().click(new Locator.ClickOptions().setForce(true));
+		Thread.sleep(1000);
+	    }
+	    page.reload();
+	    page.waitForLoadState();
+	    Thread.sleep(3000);
+	    return true;
+	} catch (Exception e) {
+	    logger.warn("handleValidationErrorByRefresh: {}", e.getMessage());
+	    return false;
+	}
+    }
+
+    private SkipAdvanceResult refreshPageForNextChart(Page page, String previousFingerprint, String reason)
+	    throws InterruptedException {
+	logger.info("{} — refreshing Zotec page for next chart", reason);
+	try {
+	    page.reload();
+	    page.waitForLoadState();
+	} catch (Exception e) {
+	    logger.warn("Page reload failed: {}", e.getMessage());
+	}
+	Thread.sleep(3000);
+	if (hasNoMoreReportsMessage(page)) {
+	    return SkipAdvanceResult.NO_MORE_REPORTS;
+	}
+	return waitForTextAdvance(page, previousFingerprint, "page refresh");
     }
 
     /**
