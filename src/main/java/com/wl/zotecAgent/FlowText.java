@@ -69,8 +69,7 @@ public class FlowText {
     }
 
     /**
-     * @param selectedClients client labels from the frontend UI; when null/empty falls back to
-     *                        {@link AllowedClients#orderedEntries()}
+     * @param selectedClients client labels from localhost:8080 Start Agent (required; no dropdown scrape)
      */
     public void Start(BrowserContext context, String agentId, List<String> selectedClients)
 	    throws Exception {
@@ -86,37 +85,24 @@ public class FlowText {
 		Thread.sleep(5000);
 	    }
 
-	    ClientLocationSelector.openClientSelector(ps, page, LOCATION_BADGE);
-	    List<String> uiLabels = ClientLocationSelector.collectUiLabels(page, LOCATION_BADGE);
-	    logger.info("Found {} blue-badge client checkbox(es) in Select client(s)", uiLabels.size());
+	    if (selectedClients == null || selectedClients.isEmpty()) {
+		throw new IllegalStateException(
+			"No clients from frontend — select clients on localhost:8080 and Start Agent");
+	    }
+	    logger.info("Walking {} frontend-selected client(s) (no Select client(s) collection)",
+		    selectedClients.size());
 
-	    List<String> allowlist = (selectedClients != null && !selectedClients.isEmpty())
-		    ? selectedClients
-		    : AllowedClients.orderedEntries();
-	    java.util.Set<Integer> usedUiIndexes = new java.util.HashSet<>();
-	    logger.info("Walking {} client entr(y/ies) from UI/allowlist (skip if missing from portal)",
-		    allowlist.size());
-
-	    for (int a = 0; a < allowlist.size(); a++) {
-		String allowEntry = allowlist.get(a);
-		int clientIndex = AllowedClients.findMatchingUiIndex(allowEntry, uiLabels, usedUiIndexes);
-		if (clientIndex < 0) {
-		    logger.info("Allowlist [{}/{}]: '{}' — not in Select client(s), skipping",
-			    a + 1, allowlist.size(), allowEntry);
-		    continue;
-		}
-		usedUiIndexes.add(clientIndex);
-		String locationKey = ClientLocationSelector.locationKeyAt(page, LOCATION_BADGE, clientIndex);
-		logger.info("Allowlist [{}/{}]: '{}' — matched UI checkbox [{}] '{}' key={}",
-			a + 1, allowlist.size(), allowEntry, clientIndex, uiLabels.get(clientIndex),
-			locationKey);
+	    for (int a = 0; a < selectedClients.size(); a++) {
+		String frontendClient = selectedClients.get(a);
+		logger.info("Frontend client [{}/{}]: '{}'", a + 1, selectedClients.size(), frontendClient);
 
 		String selectedClientLocation;
 		try {
-		    selectedClientLocation = ClientLocationSelector.selectOnlyAndApply(ps, page,
-			    LOCATION_BADGE, locationKey);
+		    selectedClientLocation = ClientLocationSelector.selectOnlyAndApplyMatchingEntry(ps,
+			    page, LOCATION_BADGE, frontendClient);
 		} catch (Exception e) {
-		    logger.warn("Could not select location '{}' — skipping: {}", allowEntry, e.getMessage());
+		    logger.warn("Could not select frontend client '{}' — skipping: {}", frontendClient,
+			    e.getMessage());
 		    continue;
 		}
 		logger.info("Selected client_location for upload metadata: {}", selectedClientLocation);
@@ -126,14 +112,15 @@ public class FlowText {
 
 		while (true) {
 		    if (hasNoMoreReportsMessage(page)) {
-			logger.info("UI: no more reports for allowlist '{}' — next location", allowEntry);
+			logger.info("UI: no more reports for frontend client '{}' — next client",
+				frontendClient);
 			break;
 		    }
 
 		    dismissDataLockedIfPresent(page);
 
 		    patientIndex++;
-		    logger.info("--- Patient #{} under '{}' ---", patientIndex, allowEntry);
+		    logger.info("--- Patient #{} under '{}' ---", patientIndex, frontendClient);
 
 		    Locator reportLoc = page.locator("//*[@id='dictated-report-text']");
 		    String text = waitForDictatedReportText(ps, page, reportLoc);
@@ -163,7 +150,7 @@ public class FlowText {
 
 		    if (hasReportCompletedMessage(page)) {
 			logger.info("UI: This report has been completed — Skip to next patient ('{}')",
-				allowEntry);
+				frontendClient);
 			SkipAdvanceResult completedSkip = clickSkipAndWaitForNext(ps, page,
 				previousTextFingerprint);
 			if (completedSkip == SkipAdvanceResult.NO_MORE_REPORTS) {
@@ -180,18 +167,18 @@ public class FlowText {
 		    SkipAdvanceResult advance = clickSubmitOrSkipAndWaitForNext(ps, page,
 			    previousTextFingerprint);
 		    if (advance == SkipAdvanceResult.NO_MORE_REPORTS) {
-			logger.info("No more patients for '{}' — next allowlist location", allowEntry);
+			logger.info("No more patients for '{}' — next frontend client", frontendClient);
 			break;
 		    }
 		    if (advance == SkipAdvanceResult.TIMEOUT) {
 			logger.warn(
 				"Submit/Skip advance timed out — stay on '{}'; will retry next loop",
-				allowEntry);
+				frontendClient);
 		    }
 		}
 	    }
 
-	    logger.info("All selected/allowlist locations processed (FlowText)");
+	    logger.info("All frontend-selected clients processed (FlowText)");
 	    page.pause();
 
 	} catch (Exception e) {
@@ -332,8 +319,9 @@ public class FlowText {
     }
 
     /**
-     * After fill: click Submit if enabled, otherwise Skip. If both disabled, refresh for next chart.
-     * After Submit/Skip, Validation Error → OK + refresh → next chart.
+     * After fill: do not click Submit/Skip — wait for the USER.
+     * Disabled for now (re-enable later): blank Accident Date, both buttons disabled,
+     * Override Edit, Validation Error.
      */
     private SkipAdvanceResult clickSubmitOrSkipAndWaitForNext(PlaywrightService ps, Page page,
 	    String previousFingerprint) throws InterruptedException {
@@ -345,53 +333,91 @@ public class FlowText {
 	dismissDataLockedIfPresent(page);
 	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
-	if (isAccidentDateBlank(page)) {
-	    logger.info("Accident Date is blank — refreshing page for next chart (skip Submit/Skip)");
-	    return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
-	}
+	// TODO enable later: blank Accident Date → refresh next chart
+	// if (isAccidentDateBlank(page)) {
+	//     logger.info("Accident Date is blank — refreshing page for next chart (skip Submit/Skip)");
+	//     return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
+	// }
 
-	boolean submitEnabled = isButtonEnabled(page, "Submit", true);
-	boolean skipEnabled = isButtonEnabled(page, "Skip", false);
+	// TODO enable later: both Submit and Skip disabled → refresh next chart
+	// boolean submitEnabled = isButtonEnabled(page, "Submit", true);
+	// boolean skipEnabled = isButtonEnabled(page, "Skip", false);
+	// if (!submitEnabled && !skipEnabled) {
+	//     logger.info("Submit and Skip both disabled — refreshing page for next chart");
+	//     return refreshPageForNextChart(page, previousFingerprint, "both Submit/Skip disabled");
+	// }
 
-	if (!submitEnabled && !skipEnabled) {
-	    logger.info("Submit and Skip both disabled — refreshing page for next chart");
-	    return refreshPageForNextChart(page, previousFingerprint, "both Submit/Skip disabled");
-	}
+	logger.info(
+		"Waiting for USER to click Submit or Skip on Zotec — bot will not click either button");
+	return waitForManualSubmitOrSkipAdvance(page, previousFingerprint);
+    }
 
-	if (submitEnabled) {
-	    logger.info("Submit enabled — clicking Submit → next patient");
+    /**
+     * Long wait (~60 min) until chart advances after the user clicks Submit or Skip.
+     */
+    private SkipAdvanceResult waitForManualSubmitOrSkipAdvance(Page page, String previousFingerprint)
+	    throws InterruptedException {
+	Locator reportLoc = page.locator("//*[@id='dictated-report-text']");
+	for (int attempt = 0; attempt < 3600; attempt++) {
+	    // TODO enable later: Override Edit & Confirm while waiting
+	    // if (handleOverrideEditAndConfirm(page, 1)) {
+	    //     logger.info("Override Edit handled while waiting for manual Submit/Skip");
+	    //     Thread.sleep(2000);
+	    //     continue;
+	    // }
+	    // TODO enable later: Validation Error → OK + refresh
+	    // if (handleValidationErrorByRefresh(page)) {
+	    //     logger.info("Validation Error while waiting — refreshed; waiting for next chart");
+	    //     Thread.sleep(2000);
+	    //     continue;
+	    // }
+	    if (dismissDataLockedIfPresent(page)) {
+		logger.info("Data Locked while waiting — OK clicked; continue waiting");
+		ZtecVerifierGate.dismissYesIDidIfPresent(page);
+		Thread.sleep(2000);
+		continue;
+	    }
 	    ZtecVerifierGate.dismissYesIDidIfPresent(page);
-	    Locator submitBtn = page.getByRole(AriaRole.BUTTON,
-		    new Page.GetByRoleOptions().setName("Submit").setExact(true));
-	    ps.click(submitBtn.first(), "Submit → next patient");
-	    Thread.sleep(3000);
-	    if (handleOverrideEditAndConfirm(page, 12)) {
-		return waitForTextAdvance(page, previousFingerprint, "Override Edit Confirm");
+	    if (hasNoMoreReportsMessage(page)) {
+		logger.info("No more reports after manual Submit/Skip");
+		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
-	    if (handleValidationErrorByRefresh(page)) {
-		return waitForTextAdvance(page, previousFingerprint, "Validation Error refresh");
+	    try {
+		String next = quietReportText(reportLoc);
+		if (next != null && !next.isBlank()) {
+		    String fp = textFingerprint(next);
+		    if (previousFingerprint == null || !fp.equals(previousFingerprint)) {
+			logger.info("Next patient detected after manual Submit/Skip");
+			return SkipAdvanceResult.NEXT_PATIENT;
+		    }
+		}
+	    } catch (Exception ignored) {
 	    }
-	    return waitForTextAdvance(page, previousFingerprint, "Submit");
+	    if (attempt > 0 && attempt % 30 == 0) {
+		logger.info("Still waiting for manual Submit/Skip... ({}s)", attempt);
+	    }
+	    Thread.sleep(1000);
 	}
-
-	logger.info("Submit missing/disabled — clicking Skip");
-	return clickSkipAndWaitForNext(ps, page, previousFingerprint);
+	logger.warn("Timed out waiting for manual Submit/Skip — stay on checkbox");
+	return SkipAdvanceResult.TIMEOUT;
     }
 
     private SkipAdvanceResult waitForTextAdvance(Page page, String previousFingerprint, String action)
 	    throws InterruptedException {
 	Locator reportLoc = page.locator("//*[@id='dictated-report-text']");
 	for (int attempt = 0; attempt < 60; attempt++) {
-	    if (handleOverrideEditAndConfirm(page, 1)) {
-		logger.info("Override Edit handled after {} — waiting for next chart", action);
-		Thread.sleep(2000);
-		continue;
-	    }
-	    if (handleValidationErrorByRefresh(page)) {
-		logger.info("Validation Error after {} — refreshed; waiting for next chart", action);
-		Thread.sleep(2000);
-		continue;
-	    }
+	    // TODO enable later: Override Edit & Confirm
+	    // if (handleOverrideEditAndConfirm(page, 1)) {
+	    //     logger.info("Override Edit handled after {} — waiting for next chart", action);
+	    //     Thread.sleep(2000);
+	    //     continue;
+	    // }
+	    // TODO enable later: Validation Error → OK + refresh
+	    // if (handleValidationErrorByRefresh(page)) {
+	    //     logger.info("Validation Error after {} — refreshed; waiting for next chart", action);
+	    //     Thread.sleep(2000);
+	    //     continue;
+	    // }
 	    if (dismissDataLockedIfPresent(page)) {
 		logger.info("Data Locked after {} — OK clicked; waiting for next patient", action);
 		Thread.sleep(2000);
@@ -430,10 +456,11 @@ public class FlowText {
 	dismissDataLockedIfPresent(page);
 	ZtecVerifierGate.dismissYesIDidThenRevealSubmitSkip(page);
 
-	if (isAccidentDateBlank(page)) {
-	    logger.info("Accident Date is blank before Skip — refreshing page for next chart");
-	    return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
-	}
+	// TODO enable later: blank Accident Date → refresh next chart
+	// if (isAccidentDateBlank(page)) {
+	//     logger.info("Accident Date is blank before Skip — refreshing page for next chart");
+	//     return refreshPageForNextChart(page, previousFingerprint, "blank Accident Date");
+	// }
 
 	Locator skipBtn = page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Skip"));
 	if (skipBtn.count() == 0 || !skipBtn.first().isEnabled()) {
@@ -444,15 +471,21 @@ public class FlowText {
 	    if (hasNoMoreReportsMessage(page)) {
 		return SkipAdvanceResult.NO_MORE_REPORTS;
 	    }
-	    logger.info("Skip button missing or disabled (and Submit not usable) — refreshing for next chart");
-	    return refreshPageForNextChart(page, previousFingerprint, "Skip disabled");
+	    // TODO enable later: Skip disabled → refresh next chart
+	    // logger.info("Skip button missing or disabled — refreshing for next chart");
+	    // return refreshPageForNextChart(page, previousFingerprint, "Skip disabled");
+	    logger.info("Skip button missing or disabled — waiting (not leaving checkbox)");
+	    Thread.sleep(3000);
+	    dismissDataLockedIfPresent(page);
+	    return SkipAdvanceResult.TIMEOUT;
 	}
 
 	ps.click(skipBtn.first(), "Skip → next patient");
 	Thread.sleep(3000);
-	if (handleValidationErrorByRefresh(page)) {
-	    return waitForTextAdvance(page, previousFingerprint, "Validation Error refresh");
-	}
+	// TODO enable later: Validation Error after Skip
+	// if (handleValidationErrorByRefresh(page)) {
+	//     return waitForTextAdvance(page, previousFingerprint, "Validation Error refresh");
+	// }
 	return waitForTextAdvance(page, previousFingerprint, "Skip");
     }
 

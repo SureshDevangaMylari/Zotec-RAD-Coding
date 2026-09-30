@@ -115,6 +115,117 @@ final class ClientLocationSelector {
     }
 
     /**
+     * Select the portal checkbox that matches a frontend-chosen client label.
+     * Keeps Select client(s) open while probing / skipping unmatched labels; closes
+     * only after a successful checkbox select + APPLY.
+     *
+     * @param frontendLabel client string from localhost:8080 Start Agent payload
+     * @return display name for upload {@code client_location}
+     */
+    static String selectOnlyAndApplyMatchingEntry(PlaywrightService ps, Page page, String badgeKind,
+	    String frontendLabel) throws InterruptedException {
+	if (frontendLabel == null || frontendLabel.isBlank()) {
+	    throw new IllegalArgumentException("frontend client label is required");
+	}
+	ensureClientSelectorOpen(ps, page, badgeKind);
+
+	String xpath = checkboxXpath(badgeKind);
+	List<Locator> boxes = ps.getElements(xpath, "location checkboxes for frontend select (" + badgeKind + ")");
+
+	Locator selected = null;
+	for (Locator box : boxes) {
+	    try {
+		String label = readClientLabel(box);
+		if (AllowedClients.matchesEntry(frontendLabel, label)) {
+		    selected = box;
+		    log.info("Frontend client '{}' matched portal checkbox label '{}'", frontendLabel, label);
+		    break;
+		}
+	    } catch (Exception e) {
+		log.warn("Could not read checkbox while matching '{}': {}", frontendLabel, e.getMessage());
+	    }
+	}
+	if (selected == null) {
+	    // Leave dropdown open so the next frontend client can be tried without close/re-open
+	    log.info("No portal match for '{}' — leaving Select client(s) open for next try", frontendLabel);
+	    throw new IllegalStateException(
+		    "No Select client(s) checkbox matched frontend selection: " + frontendLabel);
+	}
+
+	// Match found — uncheck others of this badge, check selected, APPLY, then close
+	for (Locator box : boxes) {
+	    try {
+		if (box.isChecked()) {
+		    box.click();
+		    Thread.sleep(200);
+		}
+	    } catch (Exception e) {
+		log.warn("Could not uncheck location checkbox: {}", e.getMessage());
+	    }
+	}
+	// Re-resolve after uncheck (DOM may refresh)
+	selected = null;
+	boxes = ps.getElements(xpath, "location checkboxes before APPLY (" + badgeKind + ")");
+	for (Locator box : boxes) {
+	    try {
+		String label = readClientLabel(box);
+		if (AllowedClients.matchesEntry(frontendLabel, label)) {
+		    selected = box;
+		    break;
+		}
+	    } catch (Exception ignored) {
+	    }
+	}
+	if (selected == null) {
+	    throw new IllegalStateException(
+		    "Matched client disappeared before APPLY: " + frontendLabel);
+	}
+
+	String clientLocation = WorkfileSummaryScraper.readSelectedClientDisplayName(selected);
+	if (!selected.isChecked()) {
+	    selected.click();
+	}
+	Thread.sleep(2000);
+	ps.click(page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("APPLY")),
+		"APPLY location filter");
+	Thread.sleep(500);
+	forceCloseClientDropdown(page);
+	Thread.sleep(500);
+	return clientLocation;
+    }
+
+    /**
+     * Ensure Select client(s) is open with checkboxes visible. If already open, keep it open
+     * (do not force-close / re-open). Used while walking frontend clients that may not match.
+     */
+    static void ensureClientSelectorOpen(PlaywrightService ps, Page page, String badgeKind)
+	    throws InterruptedException {
+	page.bringToFront();
+	if (isClientDropdownOpen(page)) {
+	    try {
+		if (checkboxesVisible(page, badgeKind)) {
+		    log.info("Select client(s) already open with {} checkboxes — keeping open", badgeKind);
+		    return;
+		}
+	    } catch (Exception ignored) {
+	    }
+	    // Open but empty / stale — re-force checkboxes without closing first if possible
+	    log.info("Select client(s) open but checkboxes not ready — re-forcing open (no close)");
+	    forceOpenClientDropdown(page);
+	    Thread.sleep(300);
+	    try {
+		waitForClientCheckboxesWithForceOpen(ps, page, badgeKind);
+		if (checkboxesVisible(page, badgeKind)) {
+		    return;
+		}
+	    } catch (Exception e) {
+		log.warn("Could not refresh checkboxes while open: {}", e.getMessage());
+	    }
+	}
+	openClientSelector(ps, page, badgeKind);
+    }
+
+    /**
      * Re-open Select client(s) and uncheck the finished location (and any other badge matches).
      * Call after patients for that location are done, before selecting the next.
      */
