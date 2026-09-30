@@ -26,7 +26,7 @@ public class Service {
 	    "//*[@ng-controller='Coding.Form.Coding.Professional.Charges.RowController' and @ng-form='rowForm']";
     private static final String ICD_ROWS =
 	    "//*[@ng-controller='Coding.Form.Coding.Professional.Diagnoses.RowController']";
-    /** Placeholder CPT already on the form — keep this row and fill JSON CPTs after it. */
+    /** Placeholder CPT sometimes pre-filled on the form — overwritten by the next JSON CPT. */
     private static final String CPT_PLACEHOLDER_CODE = "00000";
     /** Disable-charge reason when removing UI CPTs that are not in JSON. */
     private static final String CPT_DISABLE_REASON_NOT_IN_JSON = "NRC - Flouro used in OR";
@@ -92,11 +92,9 @@ public class Service {
      * Syncs CPT charge rows from JSON (modifier / units / diagnosis pointers /
      * servicelocation / pos). Description is left to Zotec (auto-set when code is chosen).
      * <p>
-     * {@code 00000} on the form is left as-is. Each following row that already has a CPT is
-     * overwritten with the next JSON CPT (not deleted). When a row has no CPT, remaining
-     * JSON CPTs are added. Extra UI CPTs not in JSON are then deleted with disable reason
-     * {@code NRC - Flouro used in OR}. Final UI matches JSON, plus {@code 00000} if it was
-     * already present.
+     * Existing UI CPT rows (including {@code 00000}) are overwritten with JSON CPTs in order.
+     * When a row has no CPT, remaining JSON CPTs are added. Extra UI CPTs not in JSON are then
+     * deleted with disable reason {@code NRC - Flouro used in OR}. Final UI matches JSON.
      *
      * @param cptEntries ordered CPT maps with {@code code}, optional {@code modifier},
      *                   {@code units}, {@code diagnoses}, {@code servicelocation}, {@code pos}
@@ -118,12 +116,8 @@ public class Service {
 
 	Set<String> uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values before sync: {}", uiValues);
-
-	boolean keepPlaceholder = uiValues.contains(CPT_PLACEHOLDER_CODE);
-	if (keepPlaceholder) {
-	    logger.info("CPT 00000 present — keeping that row as-is; overwrite/add JSON CPTs on following rows");
-	} else {
-	    logger.info("CPT 00000 not present — overwrite existing rows then add remaining JSON CPTs");
+	if (uiValues.contains(CPT_PLACEHOLDER_CODE)) {
+	    logger.info("CPT 00000 present — will overwrite that row with the next JSON CPT");
 	}
 
 	List<String> jsonCodesToFill = new ArrayList<>();
@@ -132,21 +126,13 @@ public class Service {
 	    if (expected == null) {
 		continue;
 	    }
-	    String norm = normalizeCptCode(expected);
-	    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(norm)) {
-		PlayTestActionLog.skip("CPT " + expected, "00000 already on form — kept existing row");
-		continue;
-	    }
 	    jsonCodesToFill.add(expected);
 	}
 
-	syncCptCodesFromJson(page, jsonCodesToFill, keepPlaceholder);
+	syncCptCodesFromJson(page, jsonCodesToFill);
 
 	Set<String> keepAfterFill = new HashSet<>(expectedNormalized);
-	if (keepPlaceholder) {
-	    keepAfterFill.add(CPT_PLACEHOLDER_CODE);
-	}
-	deleteUnwantedCptRows(page, jsonCodesToFill, keepPlaceholder);
+	deleteUnwantedCptRows(page, jsonCodesToFill);
 	deleteBlankRemovableCptRows(page);
 	uiValues = collectCptUiCodes(page);
 	logger.info("CPT UI values after final sync: {}", uiValues);
@@ -1269,10 +1255,10 @@ public class Service {
     }
 
     /**
-     * Walks CPT rows in order: keep {@code 00000}; overwrite each existing CPT with the next
+     * Walks CPT rows in order: overwrite each existing CPT (including {@code 00000}) with the next
      * JSON code; when a row has no CPT, add remaining JSON codes (typically the trailing {@code *}).
      */
-    private void syncCptCodesFromJson(Page page, List<String> jsonCodes, boolean keepPlaceholder)
+    private void syncCptCodesFromJson(Page page, List<String> jsonCodes)
 	    throws InterruptedException {
 	int jsonIdx = 0;
 	int rowIndex = 0;
@@ -1289,11 +1275,6 @@ public class Service {
 	    Locator row = rows.nth(rowIndex);
 	    String value = readCptCode(row);
 	    String valueNorm = value.isBlank() ? "" : normalizeCptCode(value);
-	    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(valueNorm)) {
-		PlayTestActionLog.skip("CPT row", "keeping 00000 as-is");
-		rowIndex++;
-		continue;
-	    }
 
 	    String jsonCode = jsonCodes.get(jsonIdx);
 	    String jsonNorm = normalizeCptCode(jsonCode);
@@ -1305,8 +1286,13 @@ public class Service {
 	    }
 
 	    if (!valueNorm.isBlank()) {
-		PlayTestActionLog.update("CPT row", "'" + value + "' -> '" + jsonCode + "'");
-		logger.info("Overwriting CPT '{}' with JSON '{}'", value, jsonCode);
+		if (CPT_PLACEHOLDER_CODE.equals(valueNorm)) {
+		    PlayTestActionLog.update("CPT row", "'00000' -> '" + jsonCode + "'");
+		    logger.info("Overwriting CPT 00000 with JSON '{}'", jsonCode);
+		} else {
+		    PlayTestActionLog.update("CPT row", "'" + value + "' -> '" + jsonCode + "'");
+		    logger.info("Overwriting CPT '{}' with JSON '{}'", value, jsonCode);
+		}
 	    } else {
 		PlayTestActionLog.add("CPT", jsonCode);
 		logger.info("Adding CPT '{}' (no code on this row)", jsonCode);
@@ -1434,11 +1420,11 @@ public class Service {
     }
 
     /**
-     * Removes CPT rows that are not part of JSON (beyond allowed counts). {@code 00000} is
-     * kept when it was already on the form. Disable reason:
+     * Removes CPT rows that are not part of JSON (beyond allowed counts). Includes leftover
+     * {@code 00000} when it is not in JSON. Disable reason:
      * {@link #CPT_DISABLE_REASON_NOT_IN_JSON}.
      */
-    private void deleteUnwantedCptRows(Page page, List<String> jsonCodes, boolean keepPlaceholder) {
+    private void deleteUnwantedCptRows(Page page, List<String> jsonCodes) {
 	Map<String, Integer> allowed = new HashMap<>();
 	for (String code : jsonCodes) {
 	    String n = normalizeCptCode(code);
@@ -1447,9 +1433,6 @@ public class Service {
 	    }
 	}
 	Set<String> expectedNormalized = new HashSet<>(allowed.keySet());
-	if (keepPlaceholder) {
-	    expectedNormalized.add(CPT_PLACEHOLDER_CODE);
-	}
 
 	for (int pass = 0; pass < 5; pass++) {
 	    Locator rows = page.locator(CPT_ROWS);
@@ -1463,9 +1446,6 @@ public class Service {
 			continue;
 		    }
 		    String norm = normalizeCptCode(value);
-		    if (keepPlaceholder && CPT_PLACEHOLDER_CODE.equals(norm)) {
-			continue;
-		    }
 		    int left = remaining.getOrDefault(norm, 0);
 		    if (left > 0) {
 			remaining.put(norm, left - 1);
