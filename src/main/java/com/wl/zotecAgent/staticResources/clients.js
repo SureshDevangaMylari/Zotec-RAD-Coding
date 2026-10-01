@@ -78,5 +78,8 @@ window.AGENT_CLIENTS = [
   "St James Healthcare ER (ORM1SJHER)",
   "St James Healthcare IP (ORM1SJHIP)",
   "St James Healthcare OFC (ORM1SJHOFC)",
-  "St James Healthcare OP (ORM1SJHOP)"
+  "St James Healthcare OP (ORM1SJHOP)",
+  "Crisp Regional Hospital ER (CRHER)",
+  "Crisp Regional Hospital IP (CRHIP)",
+  "Crisp Regional Hospital OP (CRHOP)"
 ];
