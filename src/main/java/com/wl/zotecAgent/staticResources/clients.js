@@ -81,5 +81,9 @@ window.AGENT_CLIENTS = [
   "St James Healthcare OP (ORM1SJHOP)",
   "Crisp Regional Hospital ER (CRHER)",
   "Crisp Regional Hospital IP (CRHIP)",
-  "Crisp Regional Hospital OP (CRHOP)"
+  "Crisp Regional Hospital OP (CRHOP)",
+  "Morristown Medical Center ER (CHC1-08)",
+  "Morristown Medical Center IP (CHC1-06)",
+  "Morristown Medical Center OP (CHC1-07)",
+  "PPCP DIAGNOSTIC CENTER (CRPA22)"
 ];
