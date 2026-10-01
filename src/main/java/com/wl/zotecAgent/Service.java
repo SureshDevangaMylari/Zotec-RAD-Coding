@@ -219,6 +219,52 @@ public class Service {
     }
 
     /**
+     * After CPT + ICD are on the form, set each CPT Diagnoses field to only the ICD serial
+     * numbers from that CPT's JSON {@code diagnoses} (Zotec often auto-fills all ICDs as
+     * {@code 1,2,3…}). Inapplicable serials are removed by rewriting the field.
+     */
+    void applyCptDiagnosesFromJson(Page page, List<Map<String, Object>> cptEntries, List<String> icdOrder)
+	    throws InterruptedException {
+	if (cptEntries == null || cptEntries.isEmpty()) {
+	    return;
+	}
+	PlayTestActionLog.step("applyCptDiagnosesFromJson — trim Diagnoses to JSON per CPT");
+	Thread.sleep(400);
+	for (Map<String, Object> entry : cptEntries) {
+	    String code = str(entry, "code");
+	    if (code == null) {
+		continue;
+	    }
+	    Locator row = findCptRow(page, code);
+	    if (row == null) {
+		PlayTestActionLog.skip("diagnoses trim " + code, "CPT row not found");
+		continue;
+	    }
+	    String diagnosesRaw = str(entry, "diagnoses");
+	    String diagnosesPointers = toDiagnosisPointers(diagnosesRaw, icdOrder);
+	    FieldBundle fields = resolveCptDetailFields(row);
+	    if (fields.diagnoses == null) {
+		PlayTestActionLog.skip("diagnoses trim " + code, "diagnoses input not found on row");
+		continue;
+	    }
+	    if (diagnosesPointers == null || diagnosesPointers.isBlank()) {
+		logger.info("CPT {} has no JSON diagnoses — clearing Diagnoses field of Zotec auto-fill", code);
+		setInputForce(page, fields.diagnoses, "", "diagnoses clear for " + code);
+		continue;
+	    }
+	    String current = safeInputValue(fields.diagnoses);
+	    String currentNorm = current == null ? "" : current.replaceAll("\\s+", "");
+	    if (diagnosesPointers.equals(currentNorm)) {
+		PlayTestActionLog.skip("diagnoses for " + code, currentNorm);
+		continue;
+	    }
+	    logger.info("CPT {} Diagnoses '{}' → '{}' (JSON diagnoses={})", code, current, diagnosesPointers,
+		    diagnosesRaw);
+	    setInputForce(page, fields.diagnoses, diagnosesPointers, "diagnoses for " + code);
+	}
+    }
+
+    /**
      * Order: modifiers → units → diagnoses. Service Location and POS are applied by the caller after this.
      * Description is auto-set by Zotec when CPT code is chosen — never filled from JSON.
      */
@@ -698,13 +744,19 @@ public class Service {
 
     /** Write value into an input; skip only when already equal. */
     private void setInputForce(Page page, Locator input, String value, String desc) {
-	if (input == null || value == null) {
+	if (input == null) {
 	    PlayTestActionLog.skip(desc, "input not present");
+	    return;
+	}
+	if (value == null) {
+	    PlayTestActionLog.skip(desc, "value is null");
 	    return;
 	}
 	try {
 	    String current = safeInputValue(input);
-	    if (value.equalsIgnoreCase(current)) {
+	    String currentNorm = current == null ? "" : current.replaceAll("\\s+", "");
+	    String valueNorm = value.replaceAll("\\s+", "");
+	    if (valueNorm.equalsIgnoreCase(currentNorm)) {
 		PlayTestActionLog.skip(desc, current);
 		return;
 	    }
@@ -712,7 +764,9 @@ public class Service {
 	    dismissSelect2(page);
 	    input.click(new Locator.ClickOptions().setForce(true));
 	    input.fill("");
-	    input.fill(value);
+	    if (!value.isEmpty()) {
+		input.fill(value);
+	    }
 	    input.press("Tab");
 	    Thread.sleep(300);
 	} catch (Exception e) {

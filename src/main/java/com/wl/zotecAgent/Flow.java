@@ -282,6 +282,7 @@ public class Flow {
 		//s.validateICD(icdList, page);
 		s.validateCPT(page, cptEntries, icdList);
 		s.validateICD(icdList, page);
+		s.applyCptDiagnosesFromJson(page, cptEntries, icdList);
 		CodingFormValidationService formSvc = new CodingFormValidationService(page);
 		formSvc.updateBillingExtras(patientInfo);
 		formSvc.updateIssueOrRfi(patientInfo);

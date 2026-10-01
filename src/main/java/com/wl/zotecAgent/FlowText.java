@@ -278,6 +278,7 @@ public class FlowText {
 	// Accident Date/Type often appear only after an accident ICD is on the form
 	    s.validateCPT(page, cptEntries, icdList);
 		s.validateICD(icdList, page);
+		s.applyCptDiagnosesFromJson(page, cptEntries, icdList);
 		CodingFormValidationService formSvc = new CodingFormValidationService(page);
 		formSvc.updateBillingExtras(patientInfo);
 		formSvc.updateIssueOrRfi(patientInfo);
